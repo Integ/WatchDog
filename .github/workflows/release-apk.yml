@@ -29,8 +29,12 @@ jobs:
         uses: gradle/actions/setup-gradle@v3
 
       - name: Decode keystore
-        if: secrets.SIGNING_STORE_FILE_B64 != ''
-        run: echo "$SIGNING_STORE_FILE_B64" | base64 --decode > "${{ github.workspace }}/keystore.p12"
+        run: |
+          if [ -n "$SIGNING_STORE_FILE_B64" ]; then
+            echo "$SIGNING_STORE_FILE_B64" | base64 --decode > "${{ github.workspace }}/keystore.p12"
+          else
+            echo "SIGNING_STORE_FILE_B64 is not set; skipping keystore decode."
+          fi
         env:
           SIGNING_STORE_FILE_B64: ${{ secrets.SIGNING_STORE_FILE_B64 }}
 
