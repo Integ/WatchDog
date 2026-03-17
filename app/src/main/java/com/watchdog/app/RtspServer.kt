@@ -85,16 +85,42 @@ class RtspServer(
         val nalUnits = splitNalUnits(data)
         for (nal in nalUnits) {
             if (isConfig) {
-                // Config NALs (SPS/PPS) are cached, not sent via RTP here
-                // because we send them on PLAY.
                 continue
             }
             val timestamp = (presentationTimeUs * 90 / 1000).toInt() // 90 kHz clock
+            val nalType = nal[0].toInt() and 0x1F
+            val isIdr = nalType == 5 // IDR slice
+
             for (client in clients) {
                 if (client.playing) {
+                    // Send SPS/PPS before IDR frames to ensure decoder initialization
+                    if (isIdr) {
+                        sendSpsPpsIfAvailable(client, timestamp)
+                    }
                     sendNalUnitRtp(client, nal, timestamp)
                 }
             }
+        }
+    }
+
+    private fun sendSpsPpsIfAvailable(client: ClientSession, timestamp: Int) {
+        val spsData = sps
+        val ppsData = pps
+        if (spsData != null) {
+            val spsNal = if (spsData.size > 4 && spsData[0] == 0.toByte() &&
+                spsData[1] == 0.toByte() && spsData[2] == 0.toByte() && spsData[3] == 1.toByte()
+            ) {
+                spsData.copyOfRange(4, spsData.size)
+            } else spsData
+            sendSingleNalRtp(client, spsNal, timestamp)
+        }
+        if (ppsData != null) {
+            val ppsNal = if (ppsData.size > 4 && ppsData[0] == 0.toByte() &&
+                ppsData[1] == 0.toByte() && ppsData[2] == 0.toByte() && ppsData[3] == 1.toByte()
+            ) {
+                ppsData.copyOfRange(4, ppsData.size)
+            } else ppsData
+            sendSingleNalRtp(client, ppsNal, timestamp)
         }
     }
 

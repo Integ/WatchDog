@@ -10,8 +10,10 @@ import kotlin.math.min
 class VideoHttpServer(
     port: Int,
     private val rootDir: File,
+    private val snapshotDir: File,
     private val accessToken: String,
     private val latestProvider: () -> File?,
+    private val latestSnapshotProvider: () -> File?,
     private val rtspUrl: String
 ) : NanoHTTPD(port) {
 
@@ -30,6 +32,15 @@ class VideoHttpServer(
                     serveFile(latest, session)
                 }
             }
+            "/snapshot" -> {
+                val latest = latestSnapshotProvider()
+                if (latest == null) {
+                    newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "No snapshots yet")
+                } else {
+                    serveFile(latest, session)
+                }
+            }
+            "/snapshots" -> serveSnapshotList()
             "/files" -> serveFileList()
             else -> {
                 if (session.uri.startsWith("/file/")) {
@@ -41,6 +52,19 @@ class VideoHttpServer(
                             serveFile(target, session)
                         } else {
                             newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "File not found")
+                        }
+                    } else {
+                        newFixedLengthResponse(Response.Status.FORBIDDEN, MIME_PLAINTEXT, "Forbidden")
+                    }
+                } else if (session.uri.startsWith("/snapshot/")) {
+                    val name = session.uri.removePrefix("/snapshot/")
+                    val decoded = URLDecoder.decode(name, "UTF-8")
+                    val target = File(snapshotDir, decoded)
+                    if (isSafePath(target)) {
+                        if (target.exists() && target.isFile) {
+                            serveFile(target, session)
+                        } else {
+                            newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Snapshot not found")
                         }
                     } else {
                         newFixedLengthResponse(Response.Status.FORBIDDEN, MIME_PLAINTEXT, "Forbidden")
@@ -57,6 +81,8 @@ class VideoHttpServer(
             append("<html><head><title>WatchDog</title></head><body>")
             append("<h2>WatchDog</h2>")
             append("<ul>")
+            append("<li><a href=\"${withToken("/snapshot")}\">Latest Snapshot</a></li>")
+            append("<li><a href=\"${withToken("/snapshots")}\">All Snapshots</a></li>")
             append("<li><a href=\"${withToken("/latest")}\">Latest Recording</a></li>")
             append("<li><a href=\"${withToken("/files")}\">All Recordings</a></li>")
             append("<li><a href=\"${withToken("/video")}\">Live Video (RTSP)</a></li>")
@@ -136,10 +162,39 @@ class VideoHttpServer(
         return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", body)
     }
 
+    private fun serveSnapshotList(): Response {
+        val files = snapshotDir.listFiles()?.filter { it.isFile && it.extension == "jpg" } ?: emptyList()
+        val body = buildString {
+            append("<html><head><title>Snapshots</title>")
+            append("<style>body{font-family:sans-serif;margin:2em;}img{max-width:400px;}</style>")
+            append("</head><body>")
+            append("<h2>Snapshots</h2>")
+            append("<p><a href=\"${'$'}${withToken("/snapshot")}\">Latest Snapshot</a></p>")
+            if (files.isEmpty()) {
+                append("<p>No snapshots yet.</p>")
+            } else {
+                append("<ul>")
+                for (file in files.sortedByDescending { it.lastModified() }) {
+                    val name = file.name
+                    val safeName = URLEncoder.encode(name, "UTF-8")
+                    append("<li><a href=\"${withToken("/snapshot/$safeName")}\">$name</a> (${file.length() / 1024} KB)</li>")
+                }
+                append("</ul>")
+            }
+            append("<p><a href=\"${'$'}${withToken("/")}\">← Back</a></p>")
+            append("</body></html>")
+        }
+        return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", body)
+    }
+
     private fun serveFile(file: File, session: IHTTPSession): Response {
         val fileLen = file.length()
         val rangeHeader = session.headers["range"]
-        val mime = "video/mp4"
+        val mime = when (file.extension.lowercase()) {
+            "jpg", "jpeg" -> "image/jpeg"
+            "mp4" -> "video/mp4"
+            else -> "application/octet-stream"
+        }
 
         if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
             val range = rangeHeader.removePrefix("bytes=")

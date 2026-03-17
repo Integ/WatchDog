@@ -57,6 +57,7 @@ class MainActivity : AppCompatActivity() {
     private var videoCapture: VideoCapture<Recorder>? = null
     private var recording: Recording? = null
     private lateinit var outputDir: File
+    private lateinit var snapshotDir: File
     private var httpServer: VideoHttpServer? = null
     private var rtspServer: RtspServer? = null
     private var h264Encoder: H264Encoder? = null
@@ -65,6 +66,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var analysisExecutor: ExecutorService
     private val segmentHandler = Handler(Looper.getMainLooper())
     private var isSegmenting = false // true while auto-rotating recording is active
+    private val snapshotHandler = Handler(Looper.getMainLooper())
+    private var currentImageProxy: ImageProxy? = null
 
     private val autoRotateRunnable = Runnable {
         if (isSegmenting) {
@@ -92,6 +95,11 @@ class MainActivity : AppCompatActivity() {
 
         outputDir = File(
             getExternalFilesDir(Environment.DIRECTORY_MOVIES),
+            "WatchDog"
+        ).apply { mkdirs() }
+
+        snapshotDir = File(
+            getExternalFilesDir(Environment.DIRECTORY_PICTURES),
             "WatchDog"
         ).apply { mkdirs() }
 
@@ -124,10 +132,12 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         isSegmenting = false
         segmentHandler.removeCallbacks(autoRotateRunnable)
+        snapshotHandler.removeCallbacksAndMessages(null)
         recording?.stop()
         httpServer?.stop()
         rtspServer?.stop()
         h264Encoder?.stop()
+        currentImageProxy?.close()
         analysisExecutor.shutdown()
     }
 
@@ -178,8 +188,18 @@ class MainActivity : AppCompatActivity() {
                         val timestampUs = image.imageInfo.timestamp / 1000 // ns → µs
                         encoder.feedFrame(nv12, timestampUs)
                     }
-                    image.close()
+                    // Store latest image for snapshot
+                    currentImageProxy?.close()
+                    currentImageProxy = image
                 }
+
+                // Start snapshot timer (every 10 seconds)
+                snapshotHandler.post(object : Runnable {
+                    override fun run() {
+                        captureSnapshot()
+                        snapshotHandler.postDelayed(this, 10_000)
+                    }
+                })
 
                 try {
                     cameraProvider.unbindAll()
@@ -243,6 +263,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Copy UV plane (NV12: U then V interleaved)
+        // Note: Some devices require NV21 (V then U), try swapping if colors look wrong
         val chromaHeight = height / 2
         val chromaWidth = width / 2
         var uvPos = width * height
@@ -252,8 +273,9 @@ class MainActivity : AppCompatActivity() {
             for (col in 0 until chromaWidth) {
                 val uIndex = uRowStart + col * uPixelStride
                 val vIndex = vRowStart + col * vPixelStride
-                nv12[uvPos++] = uBuffer.get(uIndex)
+                // NV21 format: V then U
                 nv12[uvPos++] = vBuffer.get(vIndex)
+                nv12[uvPos++] = uBuffer.get(uIndex)
             }
         }
 
@@ -364,8 +386,10 @@ class MainActivity : AppCompatActivity() {
         httpServer = VideoHttpServer(
             HTTP_PORT,
             outputDir,
+            snapshotDir,
             token,
             { getLatestVideoFile() },
+            { getLatestSnapshotFile() },
             buildRtspUrl()
         )
         try {
@@ -408,6 +432,31 @@ class MainActivity : AppCompatActivity() {
     private fun getLatestVideoFile(): File? {
         val files = outputDir.listFiles()?.filter { it.isFile && it.extension == "mp4" }
         return files?.maxByOrNull { it.lastModified() }
+    }
+
+    private fun getLatestSnapshotFile(): File? {
+        val files = snapshotDir.listFiles()?.filter { it.isFile && it.extension == "jpg" }
+        return files?.maxByOrNull { it.lastModified() }
+    }
+
+    private fun captureSnapshot() {
+        val image = currentImageProxy ?: return
+        try {
+            val bitmap = image.toBitmap()
+            val filename = "snapshot_${timestamp()}.jpg"
+            val file = File(snapshotDir, filename)
+            file.outputStream().use { out ->
+                bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
+            }
+            // Keep only last 100 snapshots
+            val files = snapshotDir.listFiles()?.filter { it.isFile && it.extension == "jpg" }
+                ?.sortedBy { it.lastModified() } ?: emptyList()
+            if (files.size > 100) {
+                files.take(files.size - 100).forEach { it.delete() }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Snapshot capture failed", e)
+        }
     }
 
     private fun timestamp(): String {
