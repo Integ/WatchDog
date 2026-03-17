@@ -314,16 +314,6 @@ class RtspServer(
             transportReply = "RTP/AVP;unicast;client_port=$clientRtpPort-$clientRtcpPort;server_port=$serverRtpPort-${serverRtpPort + 1}"
         }
 
-        session.clientRtpPort = clientRtpPort
-        session.clientRtcpPort = clientRtcpPort
-        session.clientAddress = session.socket.inetAddress
-
-        // Create server-side UDP socket for sending RTP
-        if (session.rtpSocket == null) {
-            session.rtpSocket = DatagramSocket()
-        }
-        val serverRtpPort = session.rtpSocket!!.localPort
-
         val sessionId = session.sessionId
 
         return "$RTSP_VERSION 200 OK\r\n" +

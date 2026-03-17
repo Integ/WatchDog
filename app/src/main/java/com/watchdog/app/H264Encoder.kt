@@ -126,7 +126,8 @@ class H264Encoder(
                             (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
 
                         if (isConfig) {
-                            parseSpsAndPps(data)
+                            sps = data
+                            pps = data
                         }
 
                         onNalUnit?.invoke(data, info.presentationTimeUs, isConfig)

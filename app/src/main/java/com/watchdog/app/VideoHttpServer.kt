@@ -109,7 +109,7 @@ class VideoHttpServer(
             append(homebridgeConfig)
             append("</code></pre>")
 
-            append("<p><a href=\"${'$'}{withToken("/")}\">← Back</a></p>")
+            append("<p><a href=\"${'$'}${withToken("/")}\">← Back</a></p>")
             append("</body></html>")
         }
         return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", body)
