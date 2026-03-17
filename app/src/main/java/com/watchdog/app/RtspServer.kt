@@ -226,6 +226,7 @@ class RtspServer(
             "SETUP" -> handleSetup(request, session, cseq)
             "PLAY" -> handlePlay(session, cseq)
             "TEARDOWN" -> handleTeardown(session, cseq)
+            "GET_PARAMETER" -> handleGetParameter(cseq)
             else -> buildResponse(405, "Method Not Allowed", cseq)
         }
     }
@@ -233,7 +234,7 @@ class RtspServer(
     private fun handleOptions(cseq: String): String {
         return "$RTSP_VERSION 200 OK\r\n" +
                 "CSeq: $cseq\r\n" +
-                "Public: OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN\r\n" +
+                "Public: OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN, GET_PARAMETER\r\n" +
                 "\r\n"
     }
 
@@ -277,10 +278,11 @@ class RtspServer(
             } else {
                 append("a=fmtp:96 packetization-mode=1;profile-level-id=$profileLevelId\r\n")
             }
-            append("a=control:streamid=0\r\n")
+            append("a=control:trackID=0\r\n")
         }
 
         val baseUri = request.uri.split("?")[0]
+        val controlUri = if (baseUri.endsWith("/")) "${baseUri}trackID=0" else "$baseUri/trackID=0"
         return "$RTSP_VERSION 200 OK\r\n" +
                 "CSeq: $cseq\r\n" +
                 "Content-Type: application/sdp\r\n" +
@@ -383,6 +385,12 @@ class RtspServer(
     private fun handleTeardown(session: ClientSession, cseq: String): String {
         session.playing = false
         session.close()
+        return "$RTSP_VERSION 200 OK\r\n" +
+                "CSeq: $cseq\r\n" +
+                "\r\n"
+    }
+
+    private fun handleGetParameter(cseq: String): String {
         return "$RTSP_VERSION 200 OK\r\n" +
                 "CSeq: $cseq\r\n" +
                 "\r\n"

@@ -21,7 +21,7 @@ class H264Encoder(
     companion object {
         private const val TAG = "H264Encoder"
         private const val MIME = MediaFormat.MIMETYPE_VIDEO_AVC
-        private const val I_FRAME_INTERVAL = 2 // seconds
+        private const val I_FRAME_INTERVAL = 1 // seconds - keyframe every 1s for faster stream startup
     }
 
     /** Callback receiving raw H.264 NAL units (including 00 00 00 01 start code). */

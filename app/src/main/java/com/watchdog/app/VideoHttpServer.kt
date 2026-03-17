@@ -47,7 +47,7 @@ class VideoHttpServer(
                     val name = session.uri.removePrefix("/file/")
                     val decoded = URLDecoder.decode(name, "UTF-8")
                     val target = File(rootDir, decoded)
-                    if (isSafePath(target)) {
+                    if (isSafePath(target, rootDir)) {
                         if (target.exists() && target.isFile) {
                             serveFile(target, session)
                         } else {
@@ -60,7 +60,7 @@ class VideoHttpServer(
                     val name = session.uri.removePrefix("/snapshot/")
                     val decoded = URLDecoder.decode(name, "UTF-8")
                     val target = File(snapshotDir, decoded)
-                    if (isSafePath(target)) {
+                    if (isSafePath(target, snapshotDir)) {
                         if (target.exists() && target.isFile) {
                             serveFile(target, session)
                         } else {
@@ -236,9 +236,9 @@ class VideoHttpServer(
         return response
     }
 
-    private fun isSafePath(file: File): Boolean {
+    private fun isSafePath(file: File, baseDir: File): Boolean {
         return try {
-            val rootPath = rootDir.canonicalPath
+            val rootPath = baseDir.canonicalPath
             val targetPath = file.canonicalPath
             targetPath.startsWith(rootPath)
         } catch (exc: Exception) {

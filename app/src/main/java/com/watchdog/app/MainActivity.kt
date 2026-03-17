@@ -43,8 +43,9 @@ class MainActivity : AppCompatActivity() {
         private const val TAG = "MainActivity"
         private const val HTTP_PORT = 8080
         private const val RTSP_PORT = 8554
-        private const val ENCODE_WIDTH = 640
-        private const val ENCODE_HEIGHT = 480
+        private const val ENCODE_WIDTH = 1280
+        private const val ENCODE_HEIGHT = 720
+        private const val ENCODE_BITRATE = 5_000_000 // 5 Mbps for 720p
         private const val SEGMENT_DURATION_MS = 30L * 60 * 1000 // 30 minutes
         private const val MAX_VIDEO_FILES = 5
         private val REQUIRED_PERMISSIONS = arrayOf(
@@ -62,7 +63,7 @@ class MainActivity : AppCompatActivity() {
     private var rtspServer: RtspServer? = null
     private var h264Encoder: H264Encoder? = null
     private lateinit var accessToken: String
-    private var tokenEnabled: Boolean = true
+    private var tokenEnabled: Boolean = false
     private lateinit var analysisExecutor: ExecutorService
     private val segmentHandler = Handler(Looper.getMainLooper())
     private var isSegmenting = false // true while auto-rotating recording is active
@@ -148,7 +149,7 @@ class MainActivity : AppCompatActivity() {
                 val cameraProvider = cameraProviderFuture.get()
 
                 // --- H.264 encoder setup ---
-                val encoder = H264Encoder(ENCODE_WIDTH, ENCODE_HEIGHT)
+                val encoder = H264Encoder(ENCODE_WIDTH, ENCODE_HEIGHT, ENCODE_BITRATE)
                 encoder.onNalUnit = { data, pts, isConfig ->
                     rtspServer?.feedNalUnit(data, pts, isConfig)
                 }
@@ -502,7 +503,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun getTokenEnabled(): Boolean {
         val prefs = getSharedPreferences("watchdog_prefs", MODE_PRIVATE)
-        return prefs.getBoolean("token_enabled", true)
+        return prefs.getBoolean("token_enabled", false)
     }
 
     private fun setTokenEnabled(enabled: Boolean) {
