@@ -167,24 +167,30 @@ class RtspServer(
     private fun handleRequest(request: RtspRequest, session: ClientSession): String {
         val cseq = request.headers["CSeq"] ?: "0"
 
-        // Token authentication
-        if (accessToken.isNotBlank()) {
-            val uri = request.uri
-            val queryStart = uri.indexOf('?')
-            var tokenValid = false
-            if (queryStart >= 0) {
-                val query = uri.substring(queryStart + 1)
-                val params = query.split("&")
-                for (param in params) {
-                    val kv = param.split("=", limit = 2)
-                    if (kv.size == 2 && kv[0] == "token" && kv[1] == accessToken) {
-                        tokenValid = true
-                        break
+        // Token authentication (session-based: authenticate once on DESCRIBE,
+        // then allow SETUP/PLAY/TEARDOWN without re-checking the token,
+        // because ffmpeg sends those with the control URL which has no token).
+        if (accessToken.isNotBlank() && !session.authenticated) {
+            if (request.method != "OPTIONS") {
+                val uri = request.uri
+                val queryStart = uri.indexOf('?')
+                var tokenValid = false
+                if (queryStart >= 0) {
+                    val query = uri.substring(queryStart + 1)
+                    val params = query.split("&")
+                    for (param in params) {
+                        val kv = param.split("=", limit = 2)
+                        if (kv.size == 2 && kv[0] == "token" && kv[1] == accessToken) {
+                            tokenValid = true
+                            break
+                        }
                     }
                 }
-            }
-            if (!tokenValid && request.method != "OPTIONS") {
-                return buildResponse(401, "Unauthorized", cseq)
+                if (tokenValid) {
+                    session.authenticated = true
+                } else {
+                    return buildResponse(401, "Unauthorized", cseq)
+                }
             }
         }
 
@@ -265,16 +271,47 @@ class RtspServer(
     ): String {
         val transport = request.headers["Transport"] ?: ""
 
-        // Parse client_port from Transport header
-        val clientPortMatch = Regex("client_port=(\\d+)-(\\d+)").find(transport)
-        val clientRtpPort: Int
-        val clientRtcpPort: Int
-        if (clientPortMatch != null) {
-            clientRtpPort = clientPortMatch.groupValues[1].toInt()
-            clientRtcpPort = clientPortMatch.groupValues[2].toInt()
+        // Check if TCP Interleaved is requested
+        val isTcp = transport.contains("interleaved=")
+        var tcpChannelRtp = 0
+        var tcpChannelRtcp = 1
+
+        val transportReply: String
+
+        if (isTcp) {
+            val interleavedMatch = Regex("interleaved=(\\d+)-(\\d+)").find(transport)
+            if (interleavedMatch != null) {
+                tcpChannelRtp = interleavedMatch.groupValues[1].toInt()
+                tcpChannelRtcp = interleavedMatch.groupValues[2].toInt()
+            }
+            session.isTcpInterleaved = true
+            session.tcpChannelRtp = tcpChannelRtp
+            session.outputStream = session.socket.getOutputStream()
+            
+            transportReply = "RTP/AVP/TCP;unicast;interleaved=$tcpChannelRtp-$tcpChannelRtcp"
         } else {
-            clientRtpPort = 5000
-            clientRtcpPort = 5001
+            // Parse client_port from Transport header for UDP
+            val clientPortMatch = Regex("client_port=(\\d+)-(\\d+)").find(transport)
+            val clientRtpPort: Int
+            val clientRtcpPort: Int
+            if (clientPortMatch != null) {
+                clientRtpPort = clientPortMatch.groupValues[1].toInt()
+                clientRtcpPort = clientPortMatch.groupValues[2].toInt()
+            } else {
+                clientRtpPort = 5000
+                clientRtcpPort = 5001
+            }
+
+            session.clientRtpPort = clientRtpPort
+            session.clientRtcpPort = clientRtcpPort
+            session.clientAddress = session.socket.inetAddress
+
+            // Create server-side UDP socket for sending RTP
+            if (session.rtpSocket == null) {
+                session.rtpSocket = DatagramSocket()
+            }
+            val serverRtpPort = session.rtpSocket!!.localPort
+            transportReply = "RTP/AVP;unicast;client_port=$clientRtpPort-$clientRtcpPort;server_port=$serverRtpPort-${serverRtpPort + 1}"
         }
 
         session.clientRtpPort = clientRtpPort
@@ -292,7 +329,7 @@ class RtspServer(
         return "$RTSP_VERSION 200 OK\r\n" +
                 "CSeq: $cseq\r\n" +
                 "Session: $sessionId\r\n" +
-                "Transport: RTP/AVP;unicast;client_port=$clientRtpPort-$clientRtcpPort;server_port=$serverRtpPort-${serverRtpPort + 1}\r\n" +
+                "Transport: $transportReply\r\n" +
                 "\r\n"
     }
 
@@ -353,7 +390,7 @@ class RtspServer(
         val packet = ByteArray(RTP_HEADER_SIZE + nal.size)
         writeRtpHeader(packet, marker = true, timestamp = timestamp)
         System.arraycopy(nal, 0, packet, RTP_HEADER_SIZE, nal.size)
-        sendUdp(client, packet)
+        sendRtpData(client, packet)
     }
 
     private fun sendFuaNalRtp(client: ClientSession, nal: ByteArray, timestamp: Int) {
@@ -379,7 +416,7 @@ class RtspServer(
             packet[RTP_HEADER_SIZE] = fuIndicator
             packet[RTP_HEADER_SIZE + 1] = fuHeader.toByte()
             System.arraycopy(nal, offset, packet, RTP_HEADER_SIZE + 2, chunkSize)
-            sendUdp(client, packet)
+            sendRtpData(client, packet)
 
             offset += chunkSize
             isStart = false
@@ -409,13 +446,33 @@ class RtspServer(
         packet[11] = (ssrc and 0xFF).toByte()
     }
 
-    private fun sendUdp(client: ClientSession, data: ByteArray) {
+    private fun sendRtpData(client: ClientSession, rtpPacket: ByteArray) {
         try {
-            val address = client.clientAddress ?: return
-            val packet = DatagramPacket(data, data.size, address, client.clientRtpPort)
-            client.rtpSocket?.send(packet)
+            if (client.isTcpInterleaved) {
+                // RFC 2326 Section 10.12 Embedded (Interleaved) Binary Data
+                // Format: Magic '$' (1 byte) | Channel ID (1 byte) | Length (2 bytes) | RTP Packet
+                val out = client.outputStream ?: return
+                val length = rtpPacket.size
+                val header = ByteArray(4)
+                header[0] = 0x24.toByte() // '$'
+                header[1] = client.tcpChannelRtp.toByte()
+                header[2] = (length shr 8).toByte()
+                header[3] = (length and 0xFF).toByte()
+
+                // Synchronize on the client session to prevent mixed writes (requests and RTP)
+                synchronized(client) {
+                    out.write(header)
+                    out.write(rtpPacket)
+                    out.flush()
+                }
+            } else {
+                val address = client.clientAddress ?: return
+                val datagram = DatagramPacket(rtpPacket, rtpPacket.size, address, client.clientRtpPort)
+                client.rtpSocket?.send(datagram)
+            }
         } catch (_: Exception) {
-            // UDP send failure (client may be gone)
+            // Send failure (client may have disconnected)
+            client.playing = false
         }
     }
 
@@ -469,10 +526,15 @@ class RtspServer(
 
     class ClientSession(val socket: Socket) {
         val sessionId: String = (System.nanoTime() / 1000).toString()
+        var isTcpInterleaved: Boolean = false
+        var tcpChannelRtp: Int = 0
+        var outputStream: OutputStream? = null
+
         var clientRtpPort: Int = 0
         var clientRtcpPort: Int = 0
         var clientAddress: InetAddress? = null
         var rtpSocket: DatagramSocket? = null
+        var authenticated: Boolean = false
 
         @Volatile
         var playing: Boolean = false

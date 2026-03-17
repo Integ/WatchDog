@@ -77,10 +77,39 @@ class VideoHttpServer(
             append("<h3>How to watch</h3>")
             append("<ul>")
             append("<li><b>VLC</b>: Media → Open Network Stream → paste the URL above</li>")
-            append("<li><b>ffplay</b>: <code>ffplay $rtspUrl</code></li>")
-            append("<li><b>ffmpeg</b>: <code>ffmpeg -i $rtspUrl -c copy output.mp4</code></li>")
+            append("<li><b>ffplay</b>: <code>ffplay ${'$'}rtspUrl</code></li>")
+            append("<li><b>ffmpeg</b>: <code>ffmpeg -i ${'$'}rtspUrl -c copy output.mp4</code></li>")
             append("</ul>")
-            append("<p><a href=\"${withToken("/")}\">← Back</a></p>")
+
+            append("<h3>Integration with Homebridge (Apple HomeKit)</h3>")
+            append("<p>To view this camera in the Apple Home app via Homebridge, install the <code>homebridge-camera-ffmpeg</code> plugin and add the following configuration to your <b>config.json</b>:</p>")
+            append("<pre style=\"background:#eee;padding:10px;border-radius:4px;overflow-x:auto;\"><code>")
+            
+            // Re-format the base rtsp URL to ensure it shows exactly what needs to be pasted
+            // including potential token query strings
+            val homebridgeConfig = """
+{
+  "platforms": [
+    {
+      "platform": "Camera-ffmpeg",
+      "cameras": [
+        {
+          "name": "WatchDog Camera",
+          "videoConfig": {
+            "source": "-rtsp_transport tcp -i ${'$'}rtspUrl",
+            "vcodec": "copy",
+            "audio": false
+          }
+        }
+      ]
+    }
+  ]
+}
+            """.trimIndent()
+            append(homebridgeConfig)
+            append("</code></pre>")
+
+            append("<p><a href=\"${'$'}{withToken("/")}\">← Back</a></p>")
             append("</body></html>")
         }
         return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", body)

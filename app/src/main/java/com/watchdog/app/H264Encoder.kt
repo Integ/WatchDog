@@ -139,7 +139,16 @@ class H264Encoder(
                     newFormat.getByteBuffer("csd-0")?.let { csd0 ->
                         val bytes = ByteArray(csd0.remaining())
                         csd0.get(bytes)
-                        parseSpsAndPps(bytes)
+                        // csd-0 typically contains SPS with start code
+                        sps = bytes
+                        Log.i(TAG, "SPS cached from csd-0 (${bytes.size} bytes)")
+                    }
+                    newFormat.getByteBuffer("csd-1")?.let { csd1 ->
+                        val bytes = ByteArray(csd1.remaining())
+                        csd1.get(bytes)
+                        // csd-1 typically contains PPS with start code
+                        pps = bytes
+                        Log.i(TAG, "PPS cached from csd-1 (${bytes.size} bytes)")
                     }
                 }
                 // INFO_TRY_AGAIN_LATER (-1) is normal, just loop
@@ -151,35 +160,5 @@ class H264Encoder(
         }
     }
 
-    /**
-     * Parse concatenated SPS+PPS from codec config data.
-     * Typical layout: 00 00 00 01 <SPS> 00 00 00 01 <PPS>
-     */
-    private fun parseSpsAndPps(data: ByteArray) {
-        val starts = mutableListOf<Int>()
-        var i = 0
-        while (i <= data.size - 4) {
-            if (data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
-                data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte()
-            ) {
-                starts.add(i)
-                i += 4
-            } else {
-                i++
-            }
-        }
-        if (starts.size >= 2) {
-            sps = data.copyOfRange(starts[0], starts[1])
-            pps = data.copyOfRange(starts[1], data.size)
-            Log.i(TAG, "SPS (${sps!!.size} bytes) + PPS (${pps!!.size} bytes) cached")
-        } else if (starts.size == 1) {
-            // Single NAL — check type
-            val nalType = data[starts[0] + 4].toInt() and 0x1F
-            if (nalType == 7) {
-                sps = data.copyOfRange(starts[0], data.size)
-            } else if (nalType == 8) {
-                pps = data.copyOfRange(starts[0], data.size)
-            }
-        }
-    }
+    // parseSpsAndPps removed as it's no longer reliable/needed since we use csd-0/csd-1 directly
 }
