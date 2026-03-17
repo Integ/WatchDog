@@ -27,6 +27,9 @@ class H264Encoder(
     /** Callback receiving raw H.264 NAL units (including 00 00 00 01 start code). */
     var onNalUnit: ((data: ByteArray, presentationTimeUs: Long, isConfig: Boolean) -> Unit)? = null
 
+    /** Callback when SPS/PPS are available (called once after format change). */
+    var onSpsPpsReady: ((sps: ByteArray, pps: ByteArray) -> Unit)? = null
+
     private var codec: MediaCodec? = null
     private var outputThread: Thread? = null
 
@@ -125,11 +128,6 @@ class H264Encoder(
                         val isConfig =
                             (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
 
-                        if (isConfig) {
-                            sps = data
-                            pps = data
-                        }
-
                         onNalUnit?.invoke(data, info.presentationTimeUs, isConfig)
                     }
                     mc.releaseOutputBuffer(index, false)
@@ -137,11 +135,14 @@ class H264Encoder(
                     val newFormat = mc.outputFormat
                     Log.i(TAG, "Output format changed: $newFormat")
                     // Extract SPS/PPS from CSD buffers when format changes
+                    var spsBytes: ByteArray? = null
+                    var ppsBytes: ByteArray? = null
                     newFormat.getByteBuffer("csd-0")?.let { csd0 ->
                         val bytes = ByteArray(csd0.remaining())
                         csd0.get(bytes)
                         // csd-0 typically contains SPS with start code
                         sps = bytes
+                        spsBytes = bytes
                         Log.i(TAG, "SPS cached from csd-0 (${bytes.size} bytes)")
                     }
                     newFormat.getByteBuffer("csd-1")?.let { csd1 ->
@@ -149,7 +150,11 @@ class H264Encoder(
                         csd1.get(bytes)
                         // csd-1 typically contains PPS with start code
                         pps = bytes
+                        ppsBytes = bytes
                         Log.i(TAG, "PPS cached from csd-1 (${bytes.size} bytes)")
+                    }
+                    if (spsBytes != null && ppsBytes != null) {
+                        onSpsPpsReady?.invoke(spsBytes!!, ppsBytes!!)
                     }
                 }
                 // INFO_TRY_AGAIN_LATER (-1) is normal, just loop

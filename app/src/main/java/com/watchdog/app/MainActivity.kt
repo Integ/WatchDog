@@ -140,11 +140,13 @@ class MainActivity : AppCompatActivity() {
                 // --- H.264 encoder setup ---
                 val encoder = H264Encoder(ENCODE_WIDTH, ENCODE_HEIGHT)
                 encoder.onNalUnit = { data, pts, isConfig ->
-                    if (isConfig) {
-                        rtspServer?.sps = encoder.sps
-                        rtspServer?.pps = encoder.pps
-                    }
                     rtspServer?.feedNalUnit(data, pts, isConfig)
+                }
+                encoder.onSpsPpsReady = { sps, pps ->
+                    rtspServer?.let {
+                        it.sps = sps
+                        it.pps = pps
+                    }
                 }
                 encoder.start()
                 h264Encoder = encoder
