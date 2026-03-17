@@ -4,13 +4,12 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.util.Log
-import android.view.Surface
 
 /**
  * Hardware H.264 encoder that outputs NAL units via callback.
  *
- * Call [start] to begin encoding.  The encoder creates its own input [Surface]
- * that should be fed by CameraX (Preview).  Encoded NAL units, including
+ * Uses ByteBuffer input mode — call [feedFrame] to submit raw NV12 frames
+ * obtained from CameraX ImageAnalysis.  Encoded NAL units, including
  * SPS/PPS parameter sets, are delivered through [onNalUnit].
  */
 class H264Encoder(
@@ -34,10 +33,6 @@ class H264Encoder(
     @Volatile
     private var running = false
 
-    /** The Surface that produces frames for the encoder.  Valid after [start]. */
-    var inputSurface: Surface? = null
-        private set
-
     /** Cached SPS NAL unit (with start code). */
     var sps: ByteArray? = null
         private set
@@ -53,13 +48,12 @@ class H264Encoder(
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL)
             setInteger(
                 MediaFormat.KEY_COLOR_FORMAT,
-                MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
+                MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
             )
         }
 
         val mc = MediaCodec.createEncoderByType(MIME)
         mc.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        inputSurface = mc.createInputSurface()
         mc.start()
         codec = mc
         running = true
@@ -70,7 +64,29 @@ class H264Encoder(
             isDaemon = true
             start()
         }
-        Log.i(TAG, "Encoder started ${width}x${height} @ ${bitRate / 1000}kbps")
+        Log.i(TAG, "Encoder started ${width}x${height} @ ${bitRate / 1000}kbps (ByteBuffer mode)")
+    }
+
+    /**
+     * Submit a raw NV12 frame for encoding.
+     * The [data] must be width*height*3/2 bytes in NV12 (Y plane + interleaved UV).
+     */
+    fun feedFrame(data: ByteArray, presentationTimeUs: Long) {
+        val mc = codec ?: return
+        if (!running) return
+
+        try {
+            val inputIndex = mc.dequeueInputBuffer(10_000) // 10 ms timeout
+            if (inputIndex >= 0) {
+                val inputBuffer = mc.getInputBuffer(inputIndex) ?: return
+                inputBuffer.clear()
+                val size = minOf(data.size, inputBuffer.capacity())
+                inputBuffer.put(data, 0, size)
+                mc.queueInputBuffer(inputIndex, 0, size, presentationTimeUs, 0)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "feedFrame error", e)
+        }
     }
 
     fun stop() {
@@ -88,7 +104,6 @@ class H264Encoder(
         } catch (_: Exception) {
         }
         codec = null
-        inputSurface = null
         Log.i(TAG, "Encoder stopped")
     }
 

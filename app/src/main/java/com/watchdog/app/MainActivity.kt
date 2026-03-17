@@ -2,14 +2,19 @@ package com.watchdog.app
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.ImageFormat
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.util.Base64
 import android.util.Log
 import android.util.Size
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FileOutputOptions
@@ -30,6 +35,8 @@ import java.security.SecureRandom
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
     companion object {
@@ -38,6 +45,8 @@ class MainActivity : AppCompatActivity() {
         private const val RTSP_PORT = 8554
         private const val ENCODE_WIDTH = 640
         private const val ENCODE_HEIGHT = 480
+        private const val SEGMENT_DURATION_MS = 30L * 60 * 1000 // 30 minutes
+        private const val MAX_VIDEO_FILES = 5
         private val REQUIRED_PERMISSIONS = arrayOf(
             Manifest.permission.CAMERA,
             Manifest.permission.RECORD_AUDIO
@@ -53,6 +62,15 @@ class MainActivity : AppCompatActivity() {
     private var h264Encoder: H264Encoder? = null
     private lateinit var accessToken: String
     private var tokenEnabled: Boolean = true
+    private lateinit var analysisExecutor: ExecutorService
+    private val segmentHandler = Handler(Looper.getMainLooper())
+    private var isSegmenting = false // true while auto-rotating recording is active
+
+    private val autoRotateRunnable = Runnable {
+        if (isSegmenting) {
+            rotateRecordingSegment()
+        }
+    }
 
     private val requestPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -69,6 +87,8 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        analysisExecutor = Executors.newSingleThreadExecutor()
 
         outputDir = File(
             getExternalFilesDir(Environment.DIRECTORY_MOVIES),
@@ -102,10 +122,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        isSegmenting = false
+        segmentHandler.removeCallbacks(autoRotateRunnable)
         recording?.stop()
         httpServer?.stop()
         rtspServer?.stop()
         h264Encoder?.stop()
+        analysisExecutor.shutdown()
     }
 
     private fun startCamera() {
@@ -118,7 +141,6 @@ class MainActivity : AppCompatActivity() {
                 val encoder = H264Encoder(ENCODE_WIDTH, ENCODE_HEIGHT)
                 encoder.onNalUnit = { data, pts, isConfig ->
                     if (isConfig) {
-                        // Update SPS/PPS in RTSP server
                         rtspServer?.sps = encoder.sps
                         rtspServer?.pps = encoder.pps
                     }
@@ -127,27 +149,9 @@ class MainActivity : AppCompatActivity() {
                 encoder.start()
                 h264Encoder = encoder
 
-                // --- Preview for UI ---
+                // --- Preview for UI display ---
                 val preview = Preview.Builder().build().also {
                     it.setSurfaceProvider(binding.previewView.surfaceProvider)
-                }
-
-                // --- Second Preview for encoder input ---
-                val encoderPreview = Preview.Builder()
-                    .setTargetResolution(Size(ENCODE_WIDTH, ENCODE_HEIGHT))
-                    .build()
-
-                encoderPreview.setSurfaceProvider { request ->
-                    val encoderSurface = encoder.inputSurface
-                    if (encoderSurface != null) {
-                        request.provideSurface(
-                            encoderSurface,
-                            ContextCompat.getMainExecutor(this)
-                        ) { result ->
-                            // Surface released
-                            Log.d(TAG, "Encoder surface result: ${result.resultCode}")
-                        }
-                    }
                 }
 
                 // --- Video recording ---
@@ -155,12 +159,25 @@ class MainActivity : AppCompatActivity() {
                     Quality.HD,
                     FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)
                 )
-
                 val recorder = Recorder.Builder()
                     .setQualitySelector(qualitySelector)
                     .build()
-
                 videoCapture = VideoCapture.withOutput(recorder)
+
+                // --- ImageAnalysis → feed H.264 encoder ---
+                val imageAnalysis = ImageAnalysis.Builder()
+                    .setTargetResolution(Size(ENCODE_WIDTH, ENCODE_HEIGHT))
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .build()
+
+                imageAnalysis.setAnalyzer(analysisExecutor) { image ->
+                    val nv12 = yuv420ToNv12(image)
+                    if (nv12 != null) {
+                        val timestampUs = image.imageInfo.timestamp / 1000 // ns → µs
+                        encoder.feedFrame(nv12, timestampUs)
+                    }
+                    image.close()
+                }
 
                 try {
                     cameraProvider.unbindAll()
@@ -169,7 +186,7 @@ class MainActivity : AppCompatActivity() {
                         CameraSelector.DEFAULT_BACK_CAMERA,
                         preview,
                         videoCapture,
-                        encoderPreview
+                        imageAnalysis
                     )
                 } catch (exc: Exception) {
                     binding.txtStatus.text = "Failed to start camera: ${exc.message}"
@@ -180,16 +197,82 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    // ---- YUV conversion ----
+
+    /**
+     * Convert ImageProxy (YUV_420_888) to NV12 byte array for MediaCodec encoder.
+     * NV12 layout: Y plane followed by interleaved UV.
+     */
+    private fun yuv420ToNv12(image: ImageProxy): ByteArray? {
+        val width = image.width
+        val height = image.height
+        if (image.format != ImageFormat.YUV_420_888) return null
+
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+
+        val yBuffer = yPlane.buffer
+        val uBuffer = uPlane.buffer
+        val vBuffer = vPlane.buffer
+
+        val yRowStride = yPlane.rowStride
+        val yPixelStride = yPlane.pixelStride
+        val uRowStride = uPlane.rowStride
+        val uPixelStride = uPlane.pixelStride
+        val vRowStride = vPlane.rowStride
+        val vPixelStride = vPlane.pixelStride
+
+        val nv12 = ByteArray(width * height + width * height / 2)
+
+        // Copy Y plane
+        var yPos = 0
+        for (row in 0 until height) {
+            val yRowStart = row * yRowStride
+            if (yPixelStride == 1) {
+                yBuffer.position(yRowStart)
+                yBuffer.get(nv12, yPos, width)
+                yPos += width
+            } else {
+                for (col in 0 until width) {
+                    nv12[yPos++] = yBuffer.get(yRowStart + col * yPixelStride)
+                }
+            }
+        }
+
+        // Copy UV plane (NV12: U then V interleaved)
+        val chromaHeight = height / 2
+        val chromaWidth = width / 2
+        var uvPos = width * height
+        for (row in 0 until chromaHeight) {
+            val uRowStart = row * uRowStride
+            val vRowStart = row * vRowStride
+            for (col in 0 until chromaWidth) {
+                val uIndex = uRowStart + col * uPixelStride
+                val vIndex = vRowStart + col * vPixelStride
+                nv12[uvPos++] = uBuffer.get(uIndex)
+                nv12[uvPos++] = vBuffer.get(vIndex)
+            }
+        }
+
+        return nv12
+    }
+
+    // ---- Recording (auto-segmented, 30-min per file, max 5 files) ----
+
     private fun toggleRecording() {
-        if (recording == null) {
-            startRecording()
+        if (!isSegmenting) {
+            isSegmenting = true
+            startRecordingSegment()
         } else {
-            stopRecording()
+            stopRecordingCompletely()
         }
     }
 
-    private fun startRecording() {
+    /** Start a single recording segment and schedule the next rotation. */
+    private fun startRecordingSegment() {
         val videoCapture = this.videoCapture ?: return
+        enforceMaxFiles()
         val fileName = "${timestamp()}.mp4"
         val outputFile = File(outputDir, fileName)
         val outputOptions = FileOutputOptions.Builder(outputFile).build()
@@ -213,28 +296,62 @@ class MainActivity : AppCompatActivity() {
 
                 is VideoRecordEvent.Finalize -> {
                     recording = null
-                    binding.btnRecord.text = getString(R.string.start_recording)
                     if (event.hasError()) {
                         binding.txtStatus.text = "Recording error: ${event.error}"
                     } else {
                         binding.txtStatus.text = "Saved: ${outputFile.name}"
+                        Log.i(TAG, "Segment saved: ${outputFile.name}")
+                    }
+                    // If still in segmenting mode, the next segment is started
+                    // by rotateRecordingSegment's callback chain.
+                    if (isSegmenting) {
+                        startRecordingSegment()
+                    } else {
+                        binding.btnRecord.text = getString(R.string.start_recording)
                     }
                 }
             }
         }
+
+        // Schedule auto-rotation after SEGMENT_DURATION_MS
+        segmentHandler.removeCallbacks(autoRotateRunnable)
+        segmentHandler.postDelayed(autoRotateRunnable, SEGMENT_DURATION_MS)
     }
 
-    private fun stopRecording() {
+    /** Called by the timer to rotate to a new segment. */
+    private fun rotateRecordingSegment() {
+        Log.i(TAG, "Auto-rotating recording segment")
+        // Stop current segment; Finalize callback will start the next one
+        recording?.stop()
+    }
+
+    /** Called when the user presses the Stop button. */
+    private fun stopRecordingCompletely() {
+        isSegmenting = false
+        segmentHandler.removeCallbacks(autoRotateRunnable)
         recording?.stop()
         recording = null
         binding.btnRecord.text = getString(R.string.start_recording)
         binding.txtStatus.text = "Stopping..."
     }
 
+    /**
+     * If there are already [MAX_VIDEO_FILES] mp4 files, delete the oldest
+     * ones until we have room for one more.
+     */
+    private fun enforceMaxFiles() {
+        val files = outputDir.listFiles()?.filter { it.isFile && it.extension == "mp4" }
+            ?.sortedBy { it.lastModified() }?.toMutableList() ?: return
+        while (files.size >= MAX_VIDEO_FILES) {
+            val oldest = files.removeFirst()
+            Log.i(TAG, "Deleting oldest recording: ${oldest.name}")
+            oldest.delete()
+        }
+    }
+
     // ---- Servers ----
 
     private fun startServers() {
-        // RTSP server
         val token = currentServerToken()
         rtspServer = RtspServer(RTSP_PORT, token).also {
             it.sps = h264Encoder?.sps
@@ -242,7 +359,6 @@ class MainActivity : AppCompatActivity() {
             it.start()
         }
 
-        // HTTP server
         httpServer = VideoHttpServer(
             HTTP_PORT,
             outputDir,
@@ -284,6 +400,8 @@ class MainActivity : AppCompatActivity() {
             base
         }
     }
+
+    // ---- Utilities ----
 
     private fun getLatestVideoFile(): File? {
         val files = outputDir.listFiles()?.filter { it.isFile && it.extension == "mp4" }
