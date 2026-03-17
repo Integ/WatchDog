@@ -159,18 +159,8 @@ set -- \
     org.gradle.wrapper.GradleWrapperMain \
     "$@"
 
-# Stop when "xargs" is not available.
-if ! command -v xargs >/dev/null 2>&1
-then
-    die "ERROR: xargs is not available"
-fi
-
-# Parse JVM options.
-eval "set -- $(
-    printf '%s\n' \"$DEFAULT_JVM_OPTS $JAVA_OPTS $GRADLE_OPTS\" |
-    xargs -n1 |
-    sed 's~[^-[:alnum:]+,./:=@_]~\\\\&~g' |
-    tr '\n' ' '
-) \"$@\""
+# Parse JVM options (avoid xargs to prevent quoting issues on CI).
+# shellcheck disable=SC2086
+set -- $DEFAULT_JVM_OPTS $JAVA_OPTS $GRADLE_OPTS "$@"
 
 exec "$JAVACMD" "$@"
