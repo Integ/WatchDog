@@ -1,0 +1,7 @@
+<resources>
+    <color name="black">#000000</color>
+    <color name="white">#FFFFFF</color>
+    <color name="overlay">#66000000</color>
+    <color name="accent">#22C55E</color>
+    <color name="danger">#EF4444</color>
+</resources>

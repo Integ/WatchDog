@@ -1,0 +1,15 @@
+# Signing artifacts (never commit)
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.crt
+*.key
+*.der
+*.b64
+
+# Local Gradle
+.gradle/
+build/
+**/build/
