@@ -12,7 +12,7 @@ class VideoHttpServer(
     private val rootDir: File,
     private val accessToken: String,
     private val latestProvider: () -> File?,
-    private val mjpegFrameProvider: () -> ByteArray?
+    private val rtspUrl: String
 ) : NanoHTTPD(port) {
 
     override fun serve(session: IHTTPSession): Response {
@@ -21,7 +21,7 @@ class VideoHttpServer(
         }
         return when (session.uri) {
             "/" -> serveIndex()
-            "/video" -> serveMjpegStream()
+            "/video" -> serveRtspInfo()
             "/latest" -> {
                 val latest = latestProvider()
                 if (latest == null) {
@@ -59,8 +59,28 @@ class VideoHttpServer(
             append("<ul>")
             append("<li><a href=\"${withToken("/latest")}\">Latest Recording</a></li>")
             append("<li><a href=\"${withToken("/files")}\">All Recordings</a></li>")
-            append("<li><a href=\"${withToken("/video")}\">Live MJPEG</a></li>")
+            append("<li><a href=\"${withToken("/video")}\">Live Video (RTSP)</a></li>")
             append("</ul>")
+            append("</body></html>")
+        }
+        return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", body)
+    }
+
+    private fun serveRtspInfo(): Response {
+        val body = buildString {
+            append("<html><head><title>WatchDog - Live RTSP</title>")
+            append("<style>body{font-family:sans-serif;margin:2em;}code{background:#eee;padding:4px 8px;border-radius:4px;}</style>")
+            append("</head><body>")
+            append("<h2>Live Video Stream (RTSP)</h2>")
+            append("<p>The live video stream is available via RTSP at:</p>")
+            append("<p><code>$rtspUrl</code></p>")
+            append("<h3>How to watch</h3>")
+            append("<ul>")
+            append("<li><b>VLC</b>: Media → Open Network Stream → paste the URL above</li>")
+            append("<li><b>ffplay</b>: <code>ffplay $rtspUrl</code></li>")
+            append("<li><b>ffmpeg</b>: <code>ffmpeg -i $rtspUrl -c copy output.mp4</code></li>")
+            append("</ul>")
+            append("<p><a href=\"${withToken("/")}\">← Back</a></p>")
             append("</body></html>")
         }
         return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", body)
@@ -182,53 +202,5 @@ class VideoHttpServer(
     private fun withToken(path: String): String {
         val tokenParam = tokenQuery()
         return if (tokenParam.isBlank()) path else "$path?$tokenParam"
-    }
-
-    private fun serveMjpegStream(): Response {
-        val boundary = "frame"
-        val stream = createMjpegStream(boundary)
-        val response = newChunkedResponse(
-            Response.Status.OK,
-            "multipart/x-mixed-replace; boundary=$boundary",
-            stream
-        )
-        response.addHeader("Cache-Control", "no-cache")
-        response.addHeader("Pragma", "no-cache")
-        response.addHeader("Connection", "close")
-        return response
-    }
-
-    private fun createMjpegStream(boundary: String): java.io.InputStream {
-        val output = java.io.PipedOutputStream()
-        val input = java.io.PipedInputStream(output)
-        val writer = java.io.BufferedOutputStream(output, 16 * 1024)
-        val thread = Thread {
-            try {
-                while (true) {
-                    val frame = mjpegFrameProvider()
-                    if (frame == null) {
-                        Thread.sleep(100)
-                        continue
-                    }
-                    writer.write("--$boundary\r\n".toByteArray(Charsets.UTF_8))
-                    writer.write("Content-Type: image/jpeg\r\n".toByteArray(Charsets.UTF_8))
-                    writer.write("Content-Length: ${frame.size}\r\n\r\n".toByteArray(Charsets.UTF_8))
-                    writer.write(frame)
-                    writer.write("\r\n".toByteArray(Charsets.UTF_8))
-                    writer.flush()
-                    Thread.sleep(100)
-                }
-            } catch (_: Exception) {
-                // Client disconnected or stream closed.
-            } finally {
-                try {
-                    writer.close()
-                } catch (_: Exception) {
-                }
-            }
-        }
-        thread.isDaemon = true
-        thread.start()
-        return input
     }
 }

@@ -5,13 +5,12 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Environment
 import android.util.Base64
+import android.util.Log
 import android.util.Size
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
-import androidx.camera.core.ImageProxy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FileOutputOptions
 import androidx.camera.video.FallbackStrategy
@@ -26,28 +25,34 @@ import com.watchdog.app.databinding.ActivityMainBinding
 import java.io.File
 import java.net.Inet4Address
 import java.net.NetworkInterface
+import java.net.URLEncoder
 import java.security.SecureRandom
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicReference
-import android.graphics.ImageFormat
-import android.graphics.Rect
-import android.graphics.YuvImage
-import java.io.ByteArrayOutputStream
 
 class MainActivity : AppCompatActivity() {
+    companion object {
+        private const val TAG = "MainActivity"
+        private const val HTTP_PORT = 8080
+        private const val RTSP_PORT = 8554
+        private const val ENCODE_WIDTH = 640
+        private const val ENCODE_HEIGHT = 480
+        private val REQUIRED_PERMISSIONS = arrayOf(
+            Manifest.permission.CAMERA,
+            Manifest.permission.RECORD_AUDIO
+        )
+    }
+
     private lateinit var binding: ActivityMainBinding
     private var videoCapture: VideoCapture<Recorder>? = null
     private var recording: Recording? = null
     private lateinit var outputDir: File
     private var httpServer: VideoHttpServer? = null
+    private var rtspServer: RtspServer? = null
+    private var h264Encoder: H264Encoder? = null
     private lateinit var accessToken: String
     private var tokenEnabled: Boolean = true
-    private lateinit var analysisExecutor: ExecutorService
-    private val latestJpeg = AtomicReference<ByteArray?>(null)
 
     private val requestPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -65,8 +70,6 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        analysisExecutor = Executors.newSingleThreadExecutor()
-
         outputDir = File(
             getExternalFilesDir(Environment.DIRECTORY_MOVIES),
             "WatchDog"
@@ -83,11 +86,11 @@ class MainActivity : AppCompatActivity() {
             }
             tokenEnabled = isChecked
             setTokenEnabled(isChecked)
-            restartHttpServer()
+            restartServers()
             updateServerUi()
         }
 
-        startHttpServer()
+        startServers()
         updateServerUi()
 
         if (allPermissionsGranted()) {
@@ -101,7 +104,8 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         recording?.stop()
         httpServer?.stop()
-        analysisExecutor.shutdown()
+        rtspServer?.stop()
+        h264Encoder?.stop()
     }
 
     private fun startCamera() {
@@ -109,10 +113,44 @@ class MainActivity : AppCompatActivity() {
         cameraProviderFuture.addListener(
             {
                 val cameraProvider = cameraProviderFuture.get()
+
+                // --- H.264 encoder setup ---
+                val encoder = H264Encoder(ENCODE_WIDTH, ENCODE_HEIGHT)
+                encoder.onNalUnit = { data, pts, isConfig ->
+                    if (isConfig) {
+                        // Update SPS/PPS in RTSP server
+                        rtspServer?.sps = encoder.sps
+                        rtspServer?.pps = encoder.pps
+                    }
+                    rtspServer?.feedNalUnit(data, pts, isConfig)
+                }
+                encoder.start()
+                h264Encoder = encoder
+
+                // --- Preview for UI ---
                 val preview = Preview.Builder().build().also {
                     it.setSurfaceProvider(binding.previewView.surfaceProvider)
                 }
 
+                // --- Second Preview for encoder input ---
+                val encoderPreview = Preview.Builder()
+                    .setTargetResolution(Size(ENCODE_WIDTH, ENCODE_HEIGHT))
+                    .build()
+
+                encoderPreview.setSurfaceProvider { request ->
+                    val encoderSurface = encoder.inputSurface
+                    if (encoderSurface != null) {
+                        request.provideSurface(
+                            encoderSurface,
+                            ContextCompat.getMainExecutor(this)
+                        ) { result ->
+                            // Surface released
+                            Log.d(TAG, "Encoder surface result: ${result.resultCode}")
+                        }
+                    }
+                }
+
+                // --- Video recording ---
                 val qualitySelector = QualitySelector.from(
                     Quality.HD,
                     FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)
@@ -123,15 +161,6 @@ class MainActivity : AppCompatActivity() {
                     .build()
 
                 videoCapture = VideoCapture.withOutput(recorder)
-                val imageAnalysis = ImageAnalysis.Builder()
-                    .setTargetResolution(Size(640, 480))
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
-
-                imageAnalysis.setAnalyzer(analysisExecutor) { image ->
-                    latestJpeg.set(imageProxyToJpeg(image))
-                    image.close()
-                }
 
                 try {
                     cameraProvider.unbindAll()
@@ -140,10 +169,11 @@ class MainActivity : AppCompatActivity() {
                         CameraSelector.DEFAULT_BACK_CAMERA,
                         preview,
                         videoCapture,
-                        imageAnalysis
+                        encoderPreview
                     )
                 } catch (exc: Exception) {
                     binding.txtStatus.text = "Failed to start camera: ${exc.message}"
+                    Log.e(TAG, "Camera bind failed", exc)
                 }
             },
             ContextCompat.getMainExecutor(this)
@@ -201,13 +231,24 @@ class MainActivity : AppCompatActivity() {
         binding.txtStatus.text = "Stopping..."
     }
 
-    private fun startHttpServer() {
+    // ---- Servers ----
+
+    private fun startServers() {
+        // RTSP server
+        val token = currentServerToken()
+        rtspServer = RtspServer(RTSP_PORT, token).also {
+            it.sps = h264Encoder?.sps
+            it.pps = h264Encoder?.pps
+            it.start()
+        }
+
+        // HTTP server
         httpServer = VideoHttpServer(
-            SERVER_PORT,
+            HTTP_PORT,
             outputDir,
-            currentServerToken(),
+            token,
             { getLatestVideoFile() },
-            { latestJpeg.get() }
+            buildRtspUrl()
         )
         try {
             httpServer?.start(fi.iki.elonen.NanoHTTPD.SOCKET_READ_TIMEOUT, false)
@@ -217,18 +258,30 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun restartHttpServer() {
+    private fun restartServers() {
         httpServer?.stop()
-        startHttpServer()
+        rtspServer?.stop()
+        startServers()
     }
 
     private fun updateServerUi() {
         val ip = getLocalIpAddress() ?: "unknown"
-        val baseUrl = "http://$ip:$SERVER_PORT/"
+        val httpBase = "http://$ip:$HTTP_PORT/"
+        val rtspBase = buildRtspUrl()
         binding.txtServer.text = if (tokenEnabled) {
-            "Server: ${baseUrl}?token=$accessToken"
+            "HTTP: ${httpBase}?token=$accessToken\nRTSP: $rtspBase"
         } else {
-            "Server: $baseUrl"
+            "HTTP: $httpBase\nRTSP: $rtspBase"
+        }
+    }
+
+    private fun buildRtspUrl(): String {
+        val ip = getLocalIpAddress() ?: "0.0.0.0"
+        val base = "rtsp://$ip:$RTSP_PORT/video"
+        return if (tokenEnabled) {
+            "$base?token=${URLEncoder.encode(accessToken, "UTF-8")}"
+        } else {
+            base
         }
     }
 
@@ -292,80 +345,9 @@ class MainActivity : AppCompatActivity() {
         return if (tokenEnabled) accessToken else ""
     }
 
-    private fun imageProxyToJpeg(image: ImageProxy): ByteArray? {
-        val nv21 = yuv420ToNv21(image) ?: return null
-        val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
-        val out = ByteArrayOutputStream()
-        val ok = yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 70, out)
-        return if (ok) out.toByteArray() else null
-    }
-
-    private fun yuv420ToNv21(image: ImageProxy): ByteArray? {
-        val width = image.width
-        val height = image.height
-        if (image.format != ImageFormat.YUV_420_888) {
-            return null
-        }
-
-        val yPlane = image.planes[0]
-        val uPlane = image.planes[1]
-        val vPlane = image.planes[2]
-
-        val yBuffer = yPlane.buffer
-        val uBuffer = uPlane.buffer
-        val vBuffer = vPlane.buffer
-
-        val yRowStride = yPlane.rowStride
-        val yPixelStride = yPlane.pixelStride
-        val uRowStride = uPlane.rowStride
-        val uPixelStride = uPlane.pixelStride
-        val vRowStride = vPlane.rowStride
-        val vPixelStride = vPlane.pixelStride
-
-        val nv21 = ByteArray(width * height + width * height / 2)
-
-        var yPos = 0
-        for (row in 0 until height) {
-            val yRowStart = row * yRowStride
-            if (yPixelStride == 1) {
-                yBuffer.position(yRowStart)
-                yBuffer.get(nv21, yPos, width)
-                yPos += width
-            } else {
-                for (col in 0 until width) {
-                    nv21[yPos++] = yBuffer.get(yRowStart + col * yPixelStride)
-                }
-            }
-        }
-
-        val chromaHeight = height / 2
-        val chromaWidth = width / 2
-        var uvPos = width * height
-        for (row in 0 until chromaHeight) {
-            val uRowStart = row * uRowStride
-            val vRowStart = row * vRowStride
-            for (col in 0 until chromaWidth) {
-                val uIndex = uRowStart + col * uPixelStride
-                val vIndex = vRowStart + col * vPixelStride
-                nv21[uvPos++] = vBuffer.get(vIndex)
-                nv21[uvPos++] = uBuffer.get(uIndex)
-            }
-        }
-
-        return nv21
-    }
-
     private fun generateAccessToken(): String {
         val bytes = ByteArray(16)
         SecureRandom().nextBytes(bytes)
         return Base64.encodeToString(bytes, Base64.URL_SAFE or Base64.NO_WRAP)
-    }
-
-    companion object {
-        private const val SERVER_PORT = 8080
-        private val REQUIRED_PERMISSIONS = arrayOf(
-            Manifest.permission.CAMERA,
-            Manifest.permission.RECORD_AUDIO
-        )
     }
 }
