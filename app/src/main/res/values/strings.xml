@@ -5,4 +5,5 @@
     <string name="server_starting">Server starting...</string>
     <string name="server_stopped">Server stopped</string>
     <string name="server_running">Server running</string>
+    <string name="enable_token">Enable access token</string>
 </resources>

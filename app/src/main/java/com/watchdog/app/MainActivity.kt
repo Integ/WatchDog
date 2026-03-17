@@ -5,10 +5,13 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Environment
 import android.util.Base64
+import android.util.Size
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.ImageProxy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FileOutputOptions
 import androidx.camera.video.FallbackStrategy
@@ -27,6 +30,13 @@ import java.security.SecureRandom
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicReference
+import android.graphics.ImageFormat
+import android.graphics.Rect
+import android.graphics.YuvImage
+import java.io.ByteArrayOutputStream
 
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
@@ -35,6 +45,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var outputDir: File
     private var httpServer: VideoHttpServer? = null
     private lateinit var accessToken: String
+    private var tokenEnabled: Boolean = true
+    private lateinit var analysisExecutor: ExecutorService
+    private val latestJpeg = AtomicReference<ByteArray?>(null)
 
     private val requestPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -52,14 +65,27 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        analysisExecutor = Executors.newSingleThreadExecutor()
+
         outputDir = File(
             getExternalFilesDir(Environment.DIRECTORY_MOVIES),
             "WatchDog"
         ).apply { mkdirs() }
 
         accessToken = getOrCreateAccessToken()
+        tokenEnabled = getTokenEnabled()
 
         binding.btnRecord.setOnClickListener { toggleRecording() }
+        binding.chkEnableToken.isChecked = tokenEnabled
+        binding.chkEnableToken.setOnCheckedChangeListener { _, isChecked ->
+            if (tokenEnabled == isChecked) {
+                return@setOnCheckedChangeListener
+            }
+            tokenEnabled = isChecked
+            setTokenEnabled(isChecked)
+            restartHttpServer()
+            updateServerUi()
+        }
 
         startHttpServer()
         updateServerUi()
@@ -75,6 +101,7 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         recording?.stop()
         httpServer?.stop()
+        analysisExecutor.shutdown()
     }
 
     private fun startCamera() {
@@ -96,6 +123,15 @@ class MainActivity : AppCompatActivity() {
                     .build()
 
                 videoCapture = VideoCapture.withOutput(recorder)
+                val imageAnalysis = ImageAnalysis.Builder()
+                    .setTargetResolution(Size(640, 480))
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .build()
+
+                imageAnalysis.setAnalyzer(analysisExecutor) { image ->
+                    latestJpeg.set(imageProxyToJpeg(image))
+                    image.close()
+                }
 
                 try {
                     cameraProvider.unbindAll()
@@ -103,7 +139,8 @@ class MainActivity : AppCompatActivity() {
                         this,
                         CameraSelector.DEFAULT_BACK_CAMERA,
                         preview,
-                        videoCapture
+                        videoCapture,
+                        imageAnalysis
                     )
                 } catch (exc: Exception) {
                     binding.txtStatus.text = "Failed to start camera: ${exc.message}"
@@ -123,7 +160,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun startRecording() {
         val videoCapture = this.videoCapture ?: return
-        val fileName = "ipcam_${timestamp()}.mp4"
+        val fileName = "${timestamp()}.mp4"
         val outputFile = File(outputDir, fileName)
         val outputOptions = FileOutputOptions.Builder(outputFile).build()
 
@@ -165,7 +202,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startHttpServer() {
-        httpServer = VideoHttpServer(SERVER_PORT, outputDir, accessToken) { getLatestVideoFile() }
+        httpServer = VideoHttpServer(
+            SERVER_PORT,
+            outputDir,
+            currentServerToken(),
+            { getLatestVideoFile() },
+            { latestJpeg.get() }
+        )
         try {
             httpServer?.start(fi.iki.elonen.NanoHTTPD.SOCKET_READ_TIMEOUT, false)
             binding.txtStatus.text = getString(R.string.server_running)
@@ -174,9 +217,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun restartHttpServer() {
+        httpServer?.stop()
+        startHttpServer()
+    }
+
     private fun updateServerUi() {
         val ip = getLocalIpAddress() ?: "unknown"
-        binding.txtServer.text = "Server: http://$ip:$SERVER_PORT/?token=$accessToken"
+        val baseUrl = "http://$ip:$SERVER_PORT/"
+        binding.txtServer.text = if (tokenEnabled) {
+            "Server: ${baseUrl}?token=$accessToken"
+        } else {
+            "Server: $baseUrl"
+        }
     }
 
     private fun getLatestVideoFile(): File? {
@@ -223,6 +276,83 @@ class MainActivity : AppCompatActivity() {
         val token = generateAccessToken()
         prefs.edit().putString("access_token", token).apply()
         return token
+    }
+
+    private fun getTokenEnabled(): Boolean {
+        val prefs = getSharedPreferences("watchdog_prefs", MODE_PRIVATE)
+        return prefs.getBoolean("token_enabled", true)
+    }
+
+    private fun setTokenEnabled(enabled: Boolean) {
+        val prefs = getSharedPreferences("watchdog_prefs", MODE_PRIVATE)
+        prefs.edit().putBoolean("token_enabled", enabled).apply()
+    }
+
+    private fun currentServerToken(): String {
+        return if (tokenEnabled) accessToken else ""
+    }
+
+    private fun imageProxyToJpeg(image: ImageProxy): ByteArray? {
+        val nv21 = yuv420ToNv21(image) ?: return null
+        val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
+        val out = ByteArrayOutputStream()
+        val ok = yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 70, out)
+        return if (ok) out.toByteArray() else null
+    }
+
+    private fun yuv420ToNv21(image: ImageProxy): ByteArray? {
+        val width = image.width
+        val height = image.height
+        if (image.format != ImageFormat.YUV_420_888) {
+            return null
+        }
+
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+
+        val yBuffer = yPlane.buffer
+        val uBuffer = uPlane.buffer
+        val vBuffer = vPlane.buffer
+
+        val yRowStride = yPlane.rowStride
+        val yPixelStride = yPlane.pixelStride
+        val uRowStride = uPlane.rowStride
+        val uPixelStride = uPlane.pixelStride
+        val vRowStride = vPlane.rowStride
+        val vPixelStride = vPlane.pixelStride
+
+        val nv21 = ByteArray(width * height + width * height / 2)
+
+        var yPos = 0
+        for (row in 0 until height) {
+            val yRowStart = row * yRowStride
+            if (yPixelStride == 1) {
+                yBuffer.position(yRowStart)
+                yBuffer.get(nv21, yPos, width)
+                yPos += width
+            } else {
+                for (col in 0 until width) {
+                    nv21[yPos++] = yBuffer.get(yRowStart + col * yPixelStride)
+                }
+            }
+        }
+
+        val chromaHeight = height / 2
+        val chromaWidth = width / 2
+        var uvPos = width * height
+        for (row in 0 until chromaHeight) {
+            val uRowStart = row * uRowStride
+            val vRowStart = row * vRowStride
+            for (col in 0 until chromaWidth) {
+                val uIndex = uRowStart + col * uPixelStride
+                val vIndex = vRowStart + col * vPixelStride
+                nv21[uvPos++] = vBuffer.get(vIndex)
+                nv21[uvPos++] = uBuffer.get(uIndex)
+            }
+        }
+
+        return nv21
     }
 
     private fun generateAccessToken(): String {

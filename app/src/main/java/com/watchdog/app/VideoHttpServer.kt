@@ -11,7 +11,8 @@ class VideoHttpServer(
     port: Int,
     private val rootDir: File,
     private val accessToken: String,
-    private val latestProvider: () -> File?
+    private val latestProvider: () -> File?,
+    private val mjpegFrameProvider: () -> ByteArray?
 ) : NanoHTTPD(port) {
 
     override fun serve(session: IHTTPSession): Response {
@@ -20,6 +21,7 @@ class VideoHttpServer(
         }
         return when (session.uri) {
             "/" -> serveIndex()
+            "/video" -> serveMjpegStream()
             "/latest" -> {
                 val latest = latestProvider()
                 if (latest == null) {
@@ -51,13 +53,13 @@ class VideoHttpServer(
     }
 
     private fun serveIndex(): Response {
-        val tokenParam = tokenQuery()
         val body = buildString {
             append("<html><head><title>WatchDog</title></head><body>")
             append("<h2>WatchDog</h2>")
             append("<ul>")
-            append("<li><a href=\"/latest?$tokenParam\">Latest Recording</a></li>")
-            append("<li><a href=\"/files?$tokenParam\">All Recordings</a></li>")
+            append("<li><a href=\"${withToken("/latest")}\">Latest Recording</a></li>")
+            append("<li><a href=\"${withToken("/files")}\">All Recordings</a></li>")
+            append("<li><a href=\"${withToken("/video")}\">Live MJPEG</a></li>")
             append("</ul>")
             append("</body></html>")
         }
@@ -66,7 +68,6 @@ class VideoHttpServer(
 
     private fun serveFileList(): Response {
         val files = rootDir.listFiles()?.filter { it.isFile && it.extension == "mp4" } ?: emptyList()
-        val tokenParam = tokenQuery()
         val body = buildString {
             append("<html><head><title>Recordings</title></head><body>")
             append("<h2>Recordings</h2>")
@@ -77,7 +78,7 @@ class VideoHttpServer(
                 for (file in files.sortedByDescending { it.lastModified() }) {
                     val name = file.name
                     val safeName = URLEncoder.encode(name, "UTF-8")
-                    append("<li><a href=\"/file/$safeName?$tokenParam\">$name</a> (${file.length() / 1024} KB)</li>")
+                    append("<li><a href=\"${withToken("/file/$safeName")}\">$name</a> (${file.length() / 1024} KB)</li>")
                 }
                 append("</ul>")
             }
@@ -172,6 +173,62 @@ class VideoHttpServer(
     }
 
     private fun tokenQuery(): String {
+        if (accessToken.isBlank()) {
+            return ""
+        }
         return "token=${URLEncoder.encode(accessToken, "UTF-8")}"
+    }
+
+    private fun withToken(path: String): String {
+        val tokenParam = tokenQuery()
+        return if (tokenParam.isBlank()) path else "$path?$tokenParam"
+    }
+
+    private fun serveMjpegStream(): Response {
+        val boundary = "frame"
+        val stream = createMjpegStream(boundary)
+        val response = newChunkedResponse(
+            Response.Status.OK,
+            "multipart/x-mixed-replace; boundary=$boundary",
+            stream
+        )
+        response.addHeader("Cache-Control", "no-cache")
+        response.addHeader("Pragma", "no-cache")
+        response.addHeader("Connection", "close")
+        return response
+    }
+
+    private fun createMjpegStream(boundary: String): java.io.InputStream {
+        val output = java.io.PipedOutputStream()
+        val input = java.io.PipedInputStream(output)
+        val writer = java.io.BufferedOutputStream(output, 16 * 1024)
+        val thread = Thread {
+            try {
+                while (true) {
+                    val frame = mjpegFrameProvider()
+                    if (frame == null) {
+                        Thread.sleep(100)
+                        continue
+                    }
+                    writer.write("--$boundary\r\n".toByteArray(Charsets.UTF_8))
+                    writer.write("Content-Type: image/jpeg\r\n".toByteArray(Charsets.UTF_8))
+                    writer.write("Content-Length: ${frame.size}\r\n\r\n".toByteArray(Charsets.UTF_8))
+                    writer.write(frame)
+                    writer.write("\r\n".toByteArray(Charsets.UTF_8))
+                    writer.flush()
+                    Thread.sleep(100)
+                }
+            } catch (_: Exception) {
+                // Client disconnected or stream closed.
+            } finally {
+                try {
+                    writer.close()
+                } catch (_: Exception) {
+                }
+            }
+        }
+        thread.isDaemon = true
+        thread.start()
+        return input
     }
 }
