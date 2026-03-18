@@ -96,7 +96,7 @@ dependencies {
     implementation("org.nanohttpd:nanohttpd:2.3.1")
 
     // WebRTC
-    implementation("io.getstream:stream-webrtc-android:2.0.3")
+    implementation("io.getstream:stream-webrtc-android:1.3.10")
 
     // JSON
     implementation("org.json:json:20231013")

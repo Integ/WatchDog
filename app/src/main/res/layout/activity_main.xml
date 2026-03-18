@@ -3,8 +3,10 @@
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:background="@color/black">
 
+    <!-- Fullscreen camera preview -->
     <androidx.camera.view.PreviewView
         android:id="@+id/previewView"
         android:layout_width="0dp"
@@ -15,48 +17,81 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
+    <!-- Recording indicator (pulsing red dot) -->
+    <View
+        android:id="@+id/recordIndicator"
+        android:layout_width="14dp"
+        android:layout_height="14dp"
+        android:layout_marginTop="20dp"
+        android:layout_marginEnd="20dp"
+        android:background="@drawable/recording_dot"
+        android:visibility="gone"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- Minimal bottom overlay -->
     <LinearLayout
         android:id="@+id/controlPanel"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="16dp"
-        android:background="@color/overlay"
+        android:paddingHorizontal="20dp"
+        android:paddingTop="16dp"
+        android:paddingBottom="24dp"
+        android:background="@drawable/overlay_gradient"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
-        <CheckBox
-            android:id="@+id/chkEnableToken"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/enable_token"
-            android:textColor="@color/white" />
-
+        <!-- Server URL -->
         <TextView
             android:id="@+id/txtServer"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:textColor="@color/white"
-            android:textSize="14sp"
+            android:fontFamily="monospace"
+            android:textColor="#CCFFFFFF"
+            android:textSize="13sp"
             android:text="@string/server_starting" />
 
+        <!-- Status -->
         <TextView
             android:id="@+id/txtStatus"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:textColor="@color/white"
-            android:textSize="13sp"
+            android:layout_marginTop="4dp"
+            android:textColor="#99FFFFFF"
+            android:textSize="12sp"
             android:text="" />
 
-        <Button
-            android:id="@+id/btnRecord"
+        <!-- Controls row -->
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
-            android:text="@string/start_recording" />
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <Button
+                android:id="@+id/btnRecord"
+                android:layout_width="0dp"
+                android:layout_height="44dp"
+                android:layout_weight="1"
+                android:text="@string/start_recording"
+                android:textSize="13sp"
+                android:textAllCaps="false"
+                android:backgroundTint="@color/accent"
+                android:textColor="@color/black" />
+
+            <CheckBox
+                android:id="@+id/chkEnableToken"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:text="@string/enable_token"
+                android:textColor="#BBFFFFFF"
+                android:textSize="12sp"
+                android:buttonTint="@color/accent" />
+        </LinearLayout>
     </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>

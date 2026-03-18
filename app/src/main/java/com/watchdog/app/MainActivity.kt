@@ -9,6 +9,8 @@ import android.os.Looper
 import android.util.Base64
 import android.util.Log
 import android.util.Size
+import android.view.View
+import android.view.WindowManager
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
@@ -26,7 +28,6 @@ import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.core.content.ContextCompat
 import com.watchdog.app.databinding.ActivityMainBinding
-import org.webrtc.PeerConnection
 import java.io.File
 import java.net.Inet4Address
 import java.net.NetworkInterface
@@ -75,9 +76,8 @@ class MainActivity : AppCompatActivity() {
     private val requestPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        val granted = permissions.entries.all { it.value }
-        if (granted) {
-            startCamera()
+        if (permissions.entries.all { it.value }) {
+            onPermissionsGranted()
         } else {
             binding.txtStatus.text = "Camera or microphone permission denied."
         }
@@ -85,44 +85,53 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Keep screen on for surveillance
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
         analysisExecutor = Executors.newSingleThreadExecutor()
 
         outputDir = File(
-            getExternalFilesDir(Environment.DIRECTORY_MOVIES),
-            "WatchDog"
+            getExternalFilesDir(Environment.DIRECTORY_MOVIES), "WatchDog"
         ).apply { mkdirs() }
 
         snapshotDir = File(
-            getExternalFilesDir(Environment.DIRECTORY_PICTURES),
-            "WatchDog"
+            getExternalFilesDir(Environment.DIRECTORY_PICTURES), "WatchDog"
         ).apply { mkdirs() }
 
         accessToken = getOrCreateAccessToken()
         tokenEnabled = getTokenEnabled()
 
+        // UI setup
         binding.btnRecord.setOnClickListener { toggleRecording() }
         binding.chkEnableToken.isChecked = tokenEnabled
         binding.chkEnableToken.setOnCheckedChangeListener { _, isChecked ->
-            if (tokenEnabled == isChecked) {
-                return@setOnCheckedChangeListener
-            }
+            if (tokenEnabled == isChecked) return@setOnCheckedChangeListener
             tokenEnabled = isChecked
             setTokenEnabled(isChecked)
             restartServers()
             updateServerUi()
         }
 
-        startServers()
-        updateServerUi()
-
         if (allPermissionsGranted()) {
-            startCamera()
+            onPermissionsGranted()
         } else {
             requestPermissionsLauncher.launch(REQUIRED_PERMISSIONS)
         }
+    }
+
+    /**
+     * Called after camera + audio permissions are granted.
+     * Initializes WebRTC, starts camera, then starts HTTP server.
+     */
+    private fun onPermissionsGranted() {
+        initWebRtc()
+        startCamera()
+        startHttpServer()
+        updateServerUi()
     }
 
     override fun onDestroy() {
@@ -137,93 +146,95 @@ class MainActivity : AppCompatActivity() {
         analysisExecutor.shutdown()
     }
 
-    private fun startCamera() {
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-        cameraProviderFuture.addListener(
-            {
-                val cameraProvider = cameraProviderFuture.get()
+    // ---- WebRTC ----
 
-                // --- WebRTC setup ---
-                webRtcService = WebRtcService(this)
-                webRtcService?.initialize()
-                webRtcService?.startCapture(ENCODE_WIDTH, ENCODE_HEIGHT, 30)
-                webRtcService?.createPeerConnection()
-
-                // --- Preview for UI display ---
-                val preview = Preview.Builder().build().also {
-                    it.setSurfaceProvider(binding.previewView.surfaceProvider)
-                }
-
-                // --- Video recording ---
-                val qualitySelector = QualitySelector.from(
-                    Quality.HD,
-                    FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)
-                )
-                val recorder = Recorder.Builder()
-                    .setQualitySelector(qualitySelector)
-                    .build()
-                videoCapture = VideoCapture.withOutput(recorder)
-
-                // --- ImageAnalysis → store latest frame for snapshot ---
-                val imageAnalysis = ImageAnalysis.Builder()
-                    .setTargetResolution(Size(ENCODE_WIDTH, ENCODE_HEIGHT))
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
-
-                imageAnalysis.setAnalyzer(analysisExecutor) { image ->
-                    // Store latest image for snapshot
-                    currentImageProxy?.close()
-                    currentImageProxy = image
-                }
-
-                // Start snapshot timer (every 10 seconds)
-                snapshotHandler.post(object : Runnable {
-                    override fun run() {
-                        captureSnapshot()
-                        snapshotHandler.postDelayed(this, 10_000)
-                    }
-                })
-
-                try {
-                    cameraProvider.unbindAll()
-                    cameraProvider.bindToLifecycle(
-                        this,
-                        CameraSelector.DEFAULT_BACK_CAMERA,
-                        preview,
-                        videoCapture,
-                        imageAnalysis
-                    )
-                } catch (exc: Exception) {
-                    binding.txtStatus.text = "Failed to start camera: ${exc.message}"
-                    Log.e(TAG, "Camera bind failed", exc)
-                }
-            },
-            ContextCompat.getMainExecutor(this)
-        )
+    private fun initWebRtc() {
+        webRtcService = WebRtcService(this).apply {
+            initialize()
+            startCapture(ENCODE_WIDTH, ENCODE_HEIGHT, 30)
+        }
+        Log.i(TAG, "WebRTC initialized and capturing")
     }
 
-    // ---- Recording (auto-segmented, 30-min per file, max 5 files) ----
+    // ---- Camera (CameraX for preview + recording + snapshot) ----
+
+    private fun startCamera() {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
+        cameraProviderFuture.addListener({
+            val cameraProvider = cameraProviderFuture.get()
+
+            // Preview for the Android device screen
+            val preview = Preview.Builder().build().also {
+                it.setSurfaceProvider(binding.previewView.surfaceProvider)
+            }
+
+            // Video recording
+            val qualitySelector = QualitySelector.from(
+                Quality.HD,
+                FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)
+            )
+            val recorder = Recorder.Builder()
+                .setQualitySelector(qualitySelector)
+                .build()
+            videoCapture = VideoCapture.withOutput(recorder)
+
+            // ImageAnalysis for periodic snapshots
+            val imageAnalysis = ImageAnalysis.Builder()
+                .setTargetResolution(Size(ENCODE_WIDTH, ENCODE_HEIGHT))
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .build()
+
+            imageAnalysis.setAnalyzer(analysisExecutor) { image ->
+                currentImageProxy?.close()
+                currentImageProxy = image
+            }
+
+            // Snapshot every 10 seconds
+            snapshotHandler.post(object : Runnable {
+                override fun run() {
+                    captureSnapshot()
+                    snapshotHandler.postDelayed(this, 10_000)
+                }
+            })
+
+            try {
+                cameraProvider.unbindAll()
+                cameraProvider.bindToLifecycle(
+                    this,
+                    CameraSelector.DEFAULT_BACK_CAMERA,
+                    preview,
+                    videoCapture,
+                    imageAnalysis
+                )
+            } catch (exc: Exception) {
+                binding.txtStatus.text = "Failed to start camera: ${exc.message}"
+                Log.e(TAG, "Camera bind failed", exc)
+            }
+        }, ContextCompat.getMainExecutor(this))
+    }
+
+    // ---- Recording (auto-segmented) ----
 
     private fun toggleRecording() {
         if (!isSegmenting) {
             isSegmenting = true
             startRecordingSegment()
+            updateRecordingUi(true)
         } else {
             stopRecordingCompletely()
         }
     }
 
     private fun startRecordingSegment() {
-        val videoCapture = this.videoCapture ?: return
+        val vc = this.videoCapture ?: return
         enforceMaxFiles()
         val fileName = "${timestamp()}.mp4"
         val outputFile = File(outputDir, fileName)
         val outputOptions = FileOutputOptions.Builder(outputFile).build()
 
-        val pendingRecording = videoCapture.output.prepareRecording(this, outputOptions).apply {
+        val pendingRecording = vc.output.prepareRecording(this, outputOptions).apply {
             if (ContextCompat.checkSelfPermission(
-                    this@MainActivity,
-                    Manifest.permission.RECORD_AUDIO
+                    this@MainActivity, Manifest.permission.RECORD_AUDIO
                 ) == PackageManager.PERMISSION_GRANTED
             ) {
                 withAudioEnabled()
@@ -233,22 +244,19 @@ class MainActivity : AppCompatActivity() {
         recording = pendingRecording.start(ContextCompat.getMainExecutor(this)) { event ->
             when (event) {
                 is VideoRecordEvent.Start -> {
-                    binding.btnRecord.text = getString(R.string.stop_recording)
-                    binding.txtStatus.text = "Recording..."
+                    binding.txtStatus.text = "● Recording…"
                 }
-
                 is VideoRecordEvent.Finalize -> {
                     recording = null
                     if (event.hasError()) {
                         binding.txtStatus.text = "Recording error: ${event.error}"
                     } else {
-                        binding.txtStatus.text = "Saved: ${outputFile.name}"
                         Log.i(TAG, "Segment saved: ${outputFile.name}")
                     }
                     if (isSegmenting) {
                         startRecordingSegment()
                     } else {
-                        binding.btnRecord.text = getString(R.string.start_recording)
+                        updateRecordingUi(false)
                     }
                 }
             }
@@ -268,8 +276,18 @@ class MainActivity : AppCompatActivity() {
         segmentHandler.removeCallbacks(autoRotateRunnable)
         recording?.stop()
         recording = null
-        binding.btnRecord.text = getString(R.string.start_recording)
-        binding.txtStatus.text = "Stopping..."
+        updateRecordingUi(false)
+    }
+
+    private fun updateRecordingUi(isRecording: Boolean) {
+        if (isRecording) {
+            binding.btnRecord.text = getString(R.string.stop_recording)
+            binding.recordIndicator.visibility = View.VISIBLE
+        } else {
+            binding.btnRecord.text = getString(R.string.start_recording)
+            binding.recordIndicator.visibility = View.GONE
+            binding.txtStatus.text = getString(R.string.server_running)
+        }
     }
 
     private fun enforceMaxFiles() {
@@ -282,15 +300,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ---- Servers ----
+    // ---- HTTP Server ----
 
-    private fun startServers() {
-        webRtcService = WebRtcService(this).apply {
-            initialize()
-            startCapture(ENCODE_WIDTH, ENCODE_HEIGHT, 30)
-            createPeerConnection()
-        }
-
+    private fun startHttpServer() {
+        val rtc = webRtcService ?: return
         httpServer = VideoHttpServer(
             HTTP_PORT,
             outputDir,
@@ -298,7 +311,7 @@ class MainActivity : AppCompatActivity() {
             currentServerToken(),
             { getLatestVideoFile() },
             { getLatestSnapshotFile() },
-            webRtcService!!
+            rtc
         )
         try {
             httpServer?.start(fi.iki.elonen.NanoHTTPD.SOCKET_READ_TIMEOUT, false)
@@ -310,30 +323,29 @@ class MainActivity : AppCompatActivity() {
 
     private fun restartServers() {
         httpServer?.stop()
-        webRtcService?.close()
-        startServers()
+        startHttpServer()
     }
 
     private fun updateServerUi() {
         val ip = getLocalIpAddress() ?: "unknown"
         val httpBase = "http://$ip:$HTTP_PORT/"
         binding.txtServer.text = if (tokenEnabled) {
-            "HTTP: ${httpBase}?token=$accessToken"
+            "$httpBase?token=$accessToken"
         } else {
-            "HTTP: $httpBase"
+            httpBase
         }
     }
 
     // ---- Utilities ----
 
     private fun getLatestVideoFile(): File? {
-        val files = outputDir.listFiles()?.filter { it.isFile && it.extension == "mp4" }
-        return files?.maxByOrNull { it.lastModified() }
+        return outputDir.listFiles()?.filter { it.isFile && it.extension == "mp4" }
+            ?.maxByOrNull { it.lastModified() }
     }
 
     private fun getLatestSnapshotFile(): File? {
-        val files = snapshotDir.listFiles()?.filter { it.isFile && it.extension == "jpg" }
-        return files?.maxByOrNull { it.lastModified() }
+        return snapshotDir.listFiles()?.filter { it.isFile && it.extension == "jpg" }
+            ?.maxByOrNull { it.lastModified() }
     }
 
     private fun captureSnapshot() {
@@ -345,6 +357,7 @@ class MainActivity : AppCompatActivity() {
             file.outputStream().use { out ->
                 bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
             }
+            // Keep max 100 snapshots
             val files = snapshotDir.listFiles()?.filter { it.isFile && it.extension == "jpg" }
                 ?.sortedBy { it.lastModified() } ?: emptyList()
             if (files.size > 100) {
@@ -356,8 +369,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun timestamp(): String {
-        val formatter = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
-        return formatter.format(Date())
+        return SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
     }
 
     private fun getLocalIpAddress(): String? {
@@ -374,9 +386,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             null
-        } catch (exc: Exception) {
-            null
-        }
+        } catch (_: Exception) { null }
     }
 
     private fun allPermissionsGranted(): Boolean {
@@ -388,22 +398,20 @@ class MainActivity : AppCompatActivity() {
     private fun getOrCreateAccessToken(): String {
         val prefs = getSharedPreferences("watchdog_prefs", MODE_PRIVATE)
         val existing = prefs.getString("access_token", null)
-        if (!existing.isNullOrBlank()) {
-            return existing
-        }
+        if (!existing.isNullOrBlank()) return existing
         val token = generateAccessToken()
         prefs.edit().putString("access_token", token).apply()
         return token
     }
 
     private fun getTokenEnabled(): Boolean {
-        val prefs = getSharedPreferences("watchdog_prefs", MODE_PRIVATE)
-        return prefs.getBoolean("token_enabled", false)
+        return getSharedPreferences("watchdog_prefs", MODE_PRIVATE)
+            .getBoolean("token_enabled", false)
     }
 
     private fun setTokenEnabled(enabled: Boolean) {
-        val prefs = getSharedPreferences("watchdog_prefs", MODE_PRIVATE)
-        prefs.edit().putBoolean("token_enabled", enabled).apply()
+        getSharedPreferences("watchdog_prefs", MODE_PRIVATE)
+            .edit().putBoolean("token_enabled", enabled).apply()
     }
 
     private fun currentServerToken(): String {
