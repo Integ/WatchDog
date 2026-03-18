@@ -123,7 +123,7 @@ class VideoHttpServer(
             val sessionId = "session_${++sessionCounter}"
             val serverCandidates = CopyOnWriteArrayList<IceCandidate>()
             val lock = Object()
-            @Volatile var answerReady = false
+            val answerReady = booleanArrayOf(false)
             var answerSdp: SessionDescription? = null
 
             val pc = webRtcService.createSessionPeerConnection(
@@ -131,9 +131,9 @@ class VideoHttpServer(
                     serverCandidates.add(candidate)
                 },
                 onConnectionStateChange = { state ->
-                    if (state == PeerConnection.PeerConnectionState.DISCONNECTED ||
-                        state == PeerConnection.PeerConnectionState.FAILED ||
-                        state == PeerConnection.PeerConnectionState.CLOSED) {
+                    if (state == PeerConnection.IceConnectionState.DISCONNECTED ||
+                        state == PeerConnection.IceConnectionState.FAILED ||
+                        state == PeerConnection.IceConnectionState.CLOSED) {
                         sessions.remove(sessionId)?.pc?.dispose()
                         Log.i(TAG, "Session $sessionId removed (state=$state), active=${sessions.size}")
                     }
@@ -160,17 +160,17 @@ class VideoHttpServer(
                                     override fun onSetSuccess() {
                                         synchronized(lock) {
                                             answerSdp = it
-                                            answerReady = true
+                                            answerReady[0] = true
                                             lock.notifyAll()
                                         }
                                     }
                                     override fun onCreateFailure(p0: String?) {
                                         Log.e(TAG, "Set local desc failed: $p0")
-                                        synchronized(lock) { answerReady = true; lock.notifyAll() }
+                                        synchronized(lock) { answerReady[0] = true; lock.notifyAll() }
                                     }
                                     override fun onSetFailure(p0: String?) {
                                         Log.e(TAG, "Set local desc failed: $p0")
-                                        synchronized(lock) { answerReady = true; lock.notifyAll() }
+                                        synchronized(lock) { answerReady[0] = true; lock.notifyAll() }
                                     }
                                 }, it)
                             }
@@ -178,7 +178,7 @@ class VideoHttpServer(
                         override fun onSetSuccess() {}
                         override fun onCreateFailure(error: String?) {
                             Log.e(TAG, "Create answer failed: $error")
-                            synchronized(lock) { answerReady = true; lock.notifyAll() }
+                            synchronized(lock) { answerReady[0] = true; lock.notifyAll() }
                         }
                         override fun onSetFailure(error: String?) {}
                     }, constraints)
@@ -186,14 +186,14 @@ class VideoHttpServer(
                 override fun onCreateFailure(p0: String?) {}
                 override fun onSetFailure(p0: String?) {
                     Log.e(TAG, "Set remote desc failed: $p0")
-                    synchronized(lock) { answerReady = true; lock.notifyAll() }
+                    synchronized(lock) { answerReady[0] = true; lock.notifyAll() }
                 }
             }, offer)
 
             // Wait for answer (max 5 seconds)
             synchronized(lock) {
                 var waited = 0
-                while (!answerReady && waited < 50) {
+                while (!answerReady[0] && waited < 50) {
                     lock.wait(100)
                     waited++
                 }

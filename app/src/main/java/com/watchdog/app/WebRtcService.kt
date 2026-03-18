@@ -104,7 +104,7 @@ class WebRtcService(private val context: Context) {
      */
     fun createSessionPeerConnection(
         onIceCandidate: (IceCandidate) -> Unit,
-        onConnectionStateChange: (PeerConnection.PeerConnectionState) -> Unit = {}
+        onConnectionStateChange: (PeerConnection.IceConnectionState) -> Unit = {}
     ): PeerConnection? {
         val config = PeerConnection.RTCConfiguration(iceServers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
@@ -113,24 +113,36 @@ class WebRtcService(private val context: Context) {
             rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE
         }
 
-        val pc = peerConnectionFactory?.createPeerConnection(config, object : PeerConnectionObserver() {
+        val pc = peerConnectionFactory?.createPeerConnection(config, object : PeerConnection.Observer {
             override fun onIceCandidate(candidate: IceCandidate) {
                 Log.d(TAG, "Server ICE candidate: ${candidate.sdp}")
                 onIceCandidate(candidate)
             }
 
-            override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {
+            override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>?) {}
+
+            override fun onIceConnectionChange(state: PeerConnection.IceConnectionState?) {
                 Log.i(TAG, "ICE connection state: $state")
+                state?.let { onConnectionStateChange(it) }
             }
 
-            override fun onSignalingChange(state: PeerConnection.SignalingState) {
+            override fun onIceConnectionReceivingChange(receiving: Boolean) {}
+
+            override fun onIceGatheringChange(state: PeerConnection.IceGatheringState?) {}
+
+            override fun onSignalingChange(state: PeerConnection.SignalingState?) {
                 Log.d(TAG, "Signaling state: $state")
             }
 
-            override fun onPeerConnectionState(state: PeerConnection.PeerConnectionState) {
-                Log.i(TAG, "Peer connection state: $state")
-                onConnectionStateChange(state)
-            }
+            override fun onAddStream(stream: MediaStream?) {}
+
+            override fun onRemoveStream(stream: MediaStream?) {}
+
+            override fun onDataChannel(dc: DataChannel?) {}
+
+            override fun onRenegotiationNeeded() {}
+
+            override fun onAddTrack(receiver: RtpReceiver?, streams: Array<out MediaStream>?) {}
         })
 
         // Add the shared video track to this connection using addTrack (not deprecated addStream)
