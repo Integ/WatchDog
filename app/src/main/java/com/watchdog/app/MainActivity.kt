@@ -2,6 +2,7 @@ package com.watchdog.app
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
@@ -65,7 +66,8 @@ class MainActivity : AppCompatActivity() {
     private val segmentHandler = Handler(Looper.getMainLooper())
     private var isSegmenting = false
     private val snapshotHandler = Handler(Looper.getMainLooper())
-    private var currentImageProxy: ImageProxy? = null
+    private var latestBitmap: Bitmap? = null
+    private val bitmapLock = Object()
 
     private val autoRotateRunnable = Runnable {
         if (isSegmenting) {
@@ -142,8 +144,11 @@ class MainActivity : AppCompatActivity() {
         recording?.stop()
         httpServer?.stop()
         webRtcService?.close()
-        currentImageProxy?.close()
         analysisExecutor.shutdown()
+        synchronized(bitmapLock) {
+            latestBitmap?.recycle()
+            latestBitmap = null
+        }
     }
 
     // ---- WebRTC ----
@@ -151,9 +156,8 @@ class MainActivity : AppCompatActivity() {
     private fun initWebRtc() {
         webRtcService = WebRtcService(this).apply {
             initialize()
-            startCapture(ENCODE_WIDTH, ENCODE_HEIGHT, 30)
         }
-        Log.i(TAG, "WebRTC initialized and capturing")
+        Log.i(TAG, "WebRTC initialized")
     }
 
     // ---- Camera (CameraX for preview + recording + snapshot) ----
@@ -185,8 +189,21 @@ class MainActivity : AppCompatActivity() {
                 .build()
 
             imageAnalysis.setAnalyzer(analysisExecutor) { image ->
-                currentImageProxy?.close()
-                currentImageProxy = image
+                // Push frame to WebRTC for live streaming (before closing)
+                webRtcService?.pushFrame(image)
+
+                // Convert to Bitmap for snapshot storage
+                try {
+                    val bmp = image.toBitmap()
+                    synchronized(bitmapLock) {
+                        latestBitmap?.recycle()
+                        latestBitmap = bmp
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Frame conversion failed", e)
+                } finally {
+                    image.close()
+                }
             }
 
             // Snapshot every 10 seconds
@@ -349,13 +366,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun captureSnapshot() {
-        val image = currentImageProxy ?: return
+        val bitmap: Bitmap
+        synchronized(bitmapLock) {
+            bitmap = latestBitmap?.copy(latestBitmap!!.config, false) ?: return
+        }
         try {
-            val bitmap = image.toBitmap()
             val filename = "snapshot_${timestamp()}.jpg"
             val file = File(snapshotDir, filename)
             file.outputStream().use { out ->
-                bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)
             }
             // Keep max 100 snapshots
             val files = snapshotDir.listFiles()?.filter { it.isFile && it.extension == "jpg" }
@@ -365,6 +384,8 @@ class MainActivity : AppCompatActivity() {
             }
         } catch (e: Exception) {
             Log.w(TAG, "Snapshot capture failed", e)
+        } finally {
+            bitmap.recycle()
         }
     }
 

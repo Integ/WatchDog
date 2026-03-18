@@ -2,13 +2,15 @@ package com.watchdog.app
 
 import android.content.Context
 import android.util.Log
+import androidx.camera.core.ImageProxy
 import org.webrtc.*
+import java.nio.ByteBuffer
 
 /**
- * Manages WebRTC video capture and per-session PeerConnections.
+ * Manages WebRTC video streaming using frames pushed from CameraX.
  *
- * - A single camera capturer feeds frames into a shared VideoSource/VideoTrack.
- * - Each browser viewer gets its own PeerConnection via [createSessionPeerConnection].
+ * Instead of opening its own camera, this service receives frames via [pushFrame]
+ * from CameraX's ImageAnalysis and forwards them to all connected WebRTC peers.
  */
 class WebRtcService(private val context: Context) {
     companion object {
@@ -18,10 +20,7 @@ class WebRtcService(private val context: Context) {
     private var eglBase: EglBase? = null
     private var peerConnectionFactory: PeerConnectionFactory? = null
     private var localVideoTrack: VideoTrack? = null
-    private var localAudioTrack: AudioTrack? = null
-    private var videoCapturer: VideoCapturer? = null
     private var videoSource: VideoSource? = null
-    private var surfaceTextureHelper: SurfaceTextureHelper? = null
 
     private val iceServers = listOf(
         PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
@@ -47,60 +46,97 @@ class WebRtcService(private val context: Context) {
             .setOptions(PeerConnectionFactory.Options())
             .createPeerConnectionFactory()
 
-        Log.i(TAG, "WebRTC initialized (shared EglBase)")
-    }
-
-    fun startCapture(width: Int, height: Int, fps: Int) {
-        val eglContext = eglBase?.eglBaseContext
-            ?: throw IllegalStateException("Must call initialize() first")
-
-        surfaceTextureHelper = SurfaceTextureHelper.create("CaptureThread", eglContext)
+        // Create video source (no capturer — frames are pushed from CameraX)
         videoSource = peerConnectionFactory?.createVideoSource(false)
-
-        videoCapturer = createCameraCapturer()
-        videoCapturer?.initialize(surfaceTextureHelper, context, videoSource?.capturerObserver)
-        videoCapturer?.startCapture(width, height, fps)
-
         localVideoTrack = peerConnectionFactory?.createVideoTrack("video0", videoSource)
         localVideoTrack?.setEnabled(true)
 
-        Log.i(TAG, "Camera capture started: ${width}x${height} @ ${fps}fps")
+        Log.i(TAG, "WebRTC initialized (frames will be pushed from CameraX)")
     }
 
     /**
-     * Creates a camera capturer using Camera2 API.
-     * Prefers back-facing camera for surveillance use case.
+     * Push a camera frame from CameraX's ImageAnalysis into WebRTC.
+     * Call this from the analyzer callback BEFORE closing the ImageProxy.
      */
-    private fun createCameraCapturer(): VideoCapturer {
-        val enumerator = Camera2Enumerator(context)
-        val deviceNames = enumerator.deviceNames
+    fun pushFrame(image: ImageProxy) {
+        val vs = videoSource ?: return
+        try {
+            val width = image.width
+            val height = image.height
+            val nv21 = imageProxyToNv21(image)
+            val rotation = image.imageInfo.rotationDegrees
+            val timestampNs = image.imageInfo.timestamp * 1000 // microseconds → nanoseconds
 
-        // Prefer back camera for surveillance
-        for (deviceName in deviceNames) {
-            if (enumerator.isBackFacing(deviceName)) {
-                val capturer = enumerator.createCapturer(deviceName, null)
-                if (capturer != null) {
-                    Log.i(TAG, "Using back camera: $deviceName")
-                    return capturer
+            val buffer = NV21Buffer(nv21, width, height, null)
+            val frame = VideoFrame(buffer, rotation, timestampNs)
+            vs.capturerObserver.onFrameCaptured(frame)
+            frame.release()
+        } catch (e: Exception) {
+            Log.w(TAG, "pushFrame failed", e)
+        }
+    }
+
+    /**
+     * Convert ImageProxy (YUV_420_888) to NV21 byte array.
+     */
+    private fun imageProxyToNv21(image: ImageProxy): ByteArray {
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+
+        val width = image.width
+        val height = image.height
+        val ySize = width * height
+        val uvSize = width * height / 2
+        val nv21 = ByteArray(ySize + uvSize)
+
+        // Copy Y plane
+        val yBuffer = yPlane.buffer
+        val yRowStride = yPlane.rowStride
+        yBuffer.rewind()
+        if (yRowStride == width) {
+            yBuffer.get(nv21, 0, ySize)
+        } else {
+            for (row in 0 until height) {
+                yBuffer.position(row * yRowStride)
+                yBuffer.get(nv21, row * width, width)
+            }
+        }
+
+        // Copy VU interleaved (NV21 format = VUVUVU...)
+        val vBuffer = vPlane.buffer
+        val uBuffer = uPlane.buffer
+        val uvRowStride = vPlane.rowStride
+        val uvPixelStride = vPlane.pixelStride
+
+        vBuffer.rewind()
+        uBuffer.rewind()
+
+        var pos = ySize
+        if (uvPixelStride == 2 && uvRowStride == width) {
+            // Fast path: UV planes are already interleaved (common on most devices)
+            // V plane contains VUVU... with pixelStride=2
+            // We can just copy the V plane buffer which has interleaved VU data
+            vBuffer.get(nv21, ySize, uvSize - 1)
+            // The last U byte is missing, get it from U plane
+            nv21[ySize + uvSize - 1] = uBuffer.get(uvSize - 2)
+        } else {
+            // Slow path: pixel-by-pixel copy
+            for (row in 0 until height / 2) {
+                for (col in 0 until width / 2) {
+                    val vIndex = row * uvRowStride + col * uvPixelStride
+                    val uIndex = row * uPlane.rowStride + col * uPlane.pixelStride
+                    nv21[pos++] = vBuffer.get(vIndex)
+                    nv21[pos++] = uBuffer.get(uIndex)
                 }
             }
         }
-        // Fallback to front camera
-        for (deviceName in deviceNames) {
-            if (enumerator.isFrontFacing(deviceName)) {
-                val capturer = enumerator.createCapturer(deviceName, null)
-                if (capturer != null) {
-                    Log.i(TAG, "Fallback to front camera: $deviceName")
-                    return capturer
-                }
-            }
-        }
-        throw IllegalStateException("No camera found")
+
+        return nv21
     }
 
     /**
      * Creates a new PeerConnection for a single viewer session.
-     * Each browser gets its own PeerConnection sharing the same local video track.
      */
     fun createSessionPeerConnection(
         onIceCandidate: (IceCandidate) -> Unit,
@@ -145,7 +181,7 @@ class WebRtcService(private val context: Context) {
             override fun onAddTrack(receiver: RtpReceiver?, streams: Array<out MediaStream>?) {}
         })
 
-        // Add the shared video track to this connection using addTrack (not deprecated addStream)
+        // Add the shared video track
         localVideoTrack?.let { track ->
             pc?.addTrack(track, listOf("stream0"))
             Log.i(TAG, "Added video track to new PeerConnection")
@@ -156,14 +192,8 @@ class WebRtcService(private val context: Context) {
 
     fun close() {
         try {
-            videoCapturer?.stopCapture()
-        } catch (_: InterruptedException) {}
-        try {
-            videoCapturer?.dispose()
             localVideoTrack?.dispose()
-            localAudioTrack?.dispose()
             videoSource?.dispose()
-            surfaceTextureHelper?.dispose()
             peerConnectionFactory?.dispose()
             eglBase?.release()
         } catch (e: Exception) {

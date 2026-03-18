@@ -105,6 +105,19 @@ class VideoHttpServer(
         return response
     }
 
+    override fun stop() {
+        super.stop()
+        for ((_, session) in sessions) {
+            try {
+                session.pc.dispose()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error disposing PeerConnection on server stop", e)
+            }
+        }
+        sessions.clear()
+        Log.i(TAG, "VideoHttpServer stopped and peer connections cleaned up")
+    }
+
     // ---- WebRTC Signaling ----
 
     private fun handleWebRtcOffer(session: IHTTPSession): Response {
