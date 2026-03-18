@@ -587,8 +587,8 @@ async function startStream() {
         // Debug: check transceivers after negotiation
         setTimeout(() => {
             console.log('Transceivers after negotiation:');
-            pc?.getTransceivers().forEach((t, i) => {
-                console.log(`Transceiver ${i}:`, {
+            pc?.getTransceivers().forEach((t, idx) => {
+                console.log('Transceiver ' + idx + ':', {
                     mid: t.mid,
                     direction: t.direction,
                     currentDirection: t.currentDirection
