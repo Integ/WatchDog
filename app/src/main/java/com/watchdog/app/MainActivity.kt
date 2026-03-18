@@ -2,7 +2,6 @@ package com.watchdog.app
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
@@ -16,7 +15,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FileOutputOptions
@@ -57,7 +55,7 @@ class MainActivity : AppCompatActivity() {
     private var videoCapture: VideoCapture<Recorder>? = null
     private var recording: Recording? = null
     private lateinit var outputDir: File
-    private lateinit var snapshotDir: File
+
     private var httpServer: VideoHttpServer? = null
     private var webRtcService: WebRtcService? = null
     private lateinit var accessToken: String
@@ -65,9 +63,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var analysisExecutor: ExecutorService
     private val segmentHandler = Handler(Looper.getMainLooper())
     private var isSegmenting = false
-    private val snapshotHandler = Handler(Looper.getMainLooper())
-    private var latestBitmap: Bitmap? = null
-    private val bitmapLock = Object()
 
     private val autoRotateRunnable = Runnable {
         if (isSegmenting) {
@@ -98,10 +93,6 @@ class MainActivity : AppCompatActivity() {
 
         outputDir = File(
             getExternalFilesDir(Environment.DIRECTORY_MOVIES), "WatchDog"
-        ).apply { mkdirs() }
-
-        snapshotDir = File(
-            getExternalFilesDir(Environment.DIRECTORY_PICTURES), "WatchDog"
         ).apply { mkdirs() }
 
         accessToken = getOrCreateAccessToken()
@@ -140,15 +131,10 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         isSegmenting = false
         segmentHandler.removeCallbacks(autoRotateRunnable)
-        snapshotHandler.removeCallbacksAndMessages(null)
         recording?.stop()
         httpServer?.stop()
         webRtcService?.close()
         analysisExecutor.shutdown()
-        synchronized(bitmapLock) {
-            latestBitmap?.recycle()
-            latestBitmap = null
-        }
     }
 
     // ---- WebRTC ----
@@ -160,7 +146,7 @@ class MainActivity : AppCompatActivity() {
         Log.i(TAG, "WebRTC initialized")
     }
 
-    // ---- Camera (CameraX for preview + recording + snapshot) ----
+    // ---- Camera (CameraX for preview + recording) ----
 
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
@@ -182,37 +168,16 @@ class MainActivity : AppCompatActivity() {
                 .build()
             videoCapture = VideoCapture.withOutput(recorder)
 
-            // ImageAnalysis for periodic snapshots
+            // ImageAnalysis for WebRTC streaming
             val imageAnalysis = ImageAnalysis.Builder()
                 .setTargetResolution(Size(ENCODE_WIDTH, ENCODE_HEIGHT))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
 
             imageAnalysis.setAnalyzer(analysisExecutor) { image ->
-                // Push frame to WebRTC for live streaming (before closing)
                 webRtcService?.pushFrame(image)
-
-                // Convert to Bitmap for snapshot storage
-                try {
-                    val bmp = image.toBitmap()
-                    synchronized(bitmapLock) {
-                        latestBitmap?.recycle()
-                        latestBitmap = bmp
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Frame conversion failed", e)
-                } finally {
-                    image.close()
-                }
+                image.close()
             }
-
-            // Snapshot every 10 seconds
-            snapshotHandler.post(object : Runnable {
-                override fun run() {
-                    captureSnapshot()
-                    snapshotHandler.postDelayed(this, 10_000)
-                }
-            })
 
             try {
                 cameraProvider.unbindAll()
@@ -324,10 +289,8 @@ class MainActivity : AppCompatActivity() {
         httpServer = VideoHttpServer(
             HTTP_PORT,
             outputDir,
-            snapshotDir,
             currentServerToken(),
             { getLatestVideoFile() },
-            { getLatestSnapshotFile() },
             rtc
         )
         try {
@@ -358,35 +321,6 @@ class MainActivity : AppCompatActivity() {
     private fun getLatestVideoFile(): File? {
         return outputDir.listFiles()?.filter { it.isFile && it.extension == "mp4" }
             ?.maxByOrNull { it.lastModified() }
-    }
-
-    private fun getLatestSnapshotFile(): File? {
-        return snapshotDir.listFiles()?.filter { it.isFile && it.extension == "jpg" }
-            ?.maxByOrNull { it.lastModified() }
-    }
-
-    private fun captureSnapshot() {
-        val bitmap: Bitmap
-        synchronized(bitmapLock) {
-            bitmap = latestBitmap?.copy(latestBitmap!!.config, false) ?: return
-        }
-        try {
-            val filename = "snapshot_${timestamp()}.jpg"
-            val file = File(snapshotDir, filename)
-            file.outputStream().use { out ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)
-            }
-            // Keep max 100 snapshots
-            val files = snapshotDir.listFiles()?.filter { it.isFile && it.extension == "jpg" }
-                ?.sortedBy { it.lastModified() } ?: emptyList()
-            if (files.size > 100) {
-                files.take(files.size - 100).forEach { it.delete() }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Snapshot capture failed", e)
-        } finally {
-            bitmap.recycle()
-        }
     }
 
     private fun timestamp(): String {

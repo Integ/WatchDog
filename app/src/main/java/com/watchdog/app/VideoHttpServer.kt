@@ -9,8 +9,6 @@ import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import java.io.File
 import java.io.FileInputStream
-import java.net.Inet4Address
-import java.net.NetworkInterface
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
@@ -20,10 +18,8 @@ import kotlin.math.min
 class VideoHttpServer(
     port: Int,
     private val rootDir: File,
-    private val snapshotDir: File,
     private val accessToken: String,
     private val latestProvider: () -> File?,
-    private val latestSnapshotProvider: () -> File?,
     private val webRtcService: WebRtcService
 ) : NanoHTTPD(port) {
 
@@ -61,15 +57,6 @@ class VideoHttpServer(
                     serveFile(latest, session)
                 }
             }
-            "/snapshot" -> {
-                val latest = latestSnapshotProvider()
-                if (latest == null) {
-                    newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "No snapshots yet")
-                } else {
-                    serveFile(latest, session)
-                }
-            }
-            "/snapshots" -> serveSnapshotList()
             "/files" -> serveFileList()
             else -> {
                 if (session.uri.startsWith("/file/")) {
@@ -79,16 +66,6 @@ class VideoHttpServer(
                     if (isSafePath(target, rootDir)) {
                         if (target.exists() && target.isFile) serveFile(target, session)
                         else newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "File not found")
-                    } else {
-                        newFixedLengthResponse(Response.Status.FORBIDDEN, MIME_PLAINTEXT, "Forbidden")
-                    }
-                } else if (session.uri.startsWith("/snapshot/")) {
-                    val name = session.uri.removePrefix("/snapshot/")
-                    val decoded = URLDecoder.decode(name, "UTF-8")
-                    val target = File(snapshotDir, decoded)
-                    if (isSafePath(target, snapshotDir)) {
-                        if (target.exists() && target.isFile) serveFile(target, session)
-                        else newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Snapshot not found")
                     } else {
                         newFixedLengthResponse(Response.Status.FORBIDDEN, MIME_PLAINTEXT, "Forbidden")
                     }
@@ -453,13 +430,6 @@ class VideoHttpServer(
         }
         .file-list a:hover { text-decoration: underline; }
         .file-list .size { color: var(--text-dim); font-size: 12px; }
-
-        /* Snapshot preview */
-        .snapshot-preview {
-            width: 100%;
-            border-radius: 8px;
-            margin-top: 8px;
-        }
         .empty { color: var(--text-dim); font-size: 13px; padding: 8px 0; }
 
         @media (max-width: 600px) {
@@ -490,19 +460,6 @@ class VideoHttpServer(
 
         <div class="card">
             <div class="card-header" onclick="toggleCard(this)">
-                <h2>📸 Snapshot</h2>
-                <span class="card-chevron">▼</span>
-            </div>
-            <div class="card-body">
-                <div class="card-body-inner">
-                    <img class="snapshot-preview" id="snapshotImg" src="/snapshot${tokenParam}" alt="" onerror="this.style.display='none'" onload="this.style.display='block'">
-                    <button class="btn" onclick="refreshSnapshot()" style="margin-top:8px">↻ Refresh</button>
-                </div>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="card-header" onclick="toggleCard(this)">
                 <h2>📁 Recordings</h2>
                 <span class="card-chevron">▼</span>
             </div>
@@ -512,22 +469,12 @@ class VideoHttpServer(
                 </div>
             </div>
         </div>
-
-        <div class="card">
-            <div class="card-header" onclick="toggleCard(this)">
-                <h2>📷 Snapshots</h2>
-                <span class="card-chevron">▼</span>
-            </div>
-            <div class="card-body">
-                <div class="card-body-inner">
-                    <ul class="file-list" id="snapsList"><li class="empty">Loading…</li></ul>
-                </div>
-            </div>
-        </div>
     </div>
 
 <script>
 const tokenParam = '${tokenParam}';
+const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+console.log('Browser:', isSafari ? 'Safari' : 'Chrome/Other');
 const pcConfig = {
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -574,13 +521,20 @@ async function startStream() {
     };
 
     pc.ontrack = (e) => {
+        console.log('ontrack fired:', e);
         if (e.streams && e.streams[0]) {
             video.srcObject = e.streams[0];
+        } else if (e.track) {
+            if (!video.srcObject) {
+                video.srcObject = new MediaStream();
+            }
+            video.srcObject.addTrack(e.track);
         }
     };
 
     pc.oniceconnectionstatechange = () => {
         const s = pc?.iceConnectionState;
+        console.log('ICE connection state:', s);
         if (s === 'connected' || s === 'completed') {
             setStatus('Live', 'ok');
             reconnectDelay = 2000;
@@ -593,10 +547,16 @@ async function startStream() {
     };
 
     // Add transceiver to receive video
-    pc.addTransceiver('video', { direction: 'recvonly' });
+    // Safari needs explicit stream in transceiver
+    const transceiverInit = isSafari 
+        ? { direction: 'recvonly', streams: [new MediaStream()] }
+        : { direction: 'recvonly' };
+    const transceiver = pc.addTransceiver('video', transceiverInit);
+    console.log('Created transceiver:', transceiver);
 
     try {
         const offer = await pc.createOffer();
+        console.log('Created offer');
         await pc.setLocalDescription(offer);
 
         const resp = await fetch('/webrtc/offer' + tokenParam, {
@@ -611,6 +571,7 @@ async function startStream() {
 
         sessionId = data.sessionId;
         await pc.setRemoteDescription(new RTCSessionDescription({ sdp: data.sdp, type: data.type }));
+        console.log('Remote description set');
 
         // Add server ICE candidates
         if (data.iceCandidates) {
@@ -622,8 +583,22 @@ async function startStream() {
                 }));
             }
         }
+        
+        // Debug: check transceivers after negotiation
+        setTimeout(() => {
+            console.log('Transceivers after negotiation:');
+            pc?.getTransceivers().forEach((t, i) => {
+                console.log(`Transceiver ${i}:`, {
+                    mid: t.mid,
+                    direction: t.direction,
+                    currentDirection: t.currentDirection
+                });
+            });
+        }, 2000);
+        
         setStatus('Stream started', 'ok');
     } catch (e) {
+        console.error('Stream error:', e);
         setStatus('Error: ' + e.message, 'err');
         scheduleReconnect();
     }
@@ -673,12 +648,6 @@ function toggleCard(header) {
     chevron.style.transform = body.classList.contains('open') ? 'rotate(180deg)' : '';
 }
 
-function refreshSnapshot() {
-    const img = document.getElementById('snapshotImg');
-    img.src = '/snapshot' + tokenParam + (tokenParam ? '&' : '?') + 't=' + Date.now();
-    img.style.display = 'block';
-}
-
 function loadList(url, elId, prefix) {
     fetch(url).then(r => r.text()).then(html => {
         const el = document.getElementById(elId);
@@ -696,7 +665,6 @@ function loadList(url, elId, prefix) {
     });
 }
 loadList('/files' + tokenParam, 'filesList', 'file');
-loadList('/snapshots' + tokenParam, 'snapsList', 'snapshot');
 
 // Auto-start
 startStream();
@@ -721,31 +689,6 @@ startStream();
                     val safeName = URLEncoder.encode(name, "UTF-8")
                     val sizeMb = String.format("%.1f", file.length() / (1024.0 * 1024.0))
                     append("<li><a href=\"/file/$safeName\">$name</a> <span style='color:#71717a'>($sizeMb MB)</span></li>")
-                }
-                append("</ul>")
-            }
-            append("<p><a href=\"/\">← Back</a></p>")
-            append("</body></html>")
-        }
-        return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", body)
-    }
-
-    private fun serveSnapshotList(): Response {
-        val files = snapshotDir.listFiles()?.filter { it.isFile && it.extension == "jpg" } ?: emptyList()
-        val body = buildString {
-            append("<html><head><title>Snapshots</title>")
-            append("<style>body{font-family:sans-serif;margin:2em;background:#0a0a0f;color:#e4e4e7;}img{max-width:300px;margin:10px;}a{color:#22c55e;}</style>")
-            append("</head><body>")
-            append("<h2>📷 Snapshots</h2>")
-            if (files.isEmpty()) {
-                append("<p>No snapshots yet.</p>")
-            } else {
-                append("<ul>")
-                for (file in files.sortedByDescending { it.lastModified() }.take(50)) {
-                    val name = file.name
-                    val safeName = URLEncoder.encode(name, "UTF-8")
-                    val sizeKb = file.length() / 1024
-                    append("<li><a href=\"/snapshot/$safeName\">$name</a> <span style='color:#71717a'>($sizeKb KB)</span></li>")
                 }
                 append("</ul>")
             }
