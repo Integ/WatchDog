@@ -1,6 +1,8 @@
 package com.watchdog.app
 
 import fi.iki.elonen.NanoHTTPD
+import org.webrtc.IceCandidate
+import org.webrtc.SessionDescription
 import java.io.File
 import java.io.FileInputStream
 import java.net.URLDecoder
@@ -14,16 +16,24 @@ class VideoHttpServer(
     private val accessToken: String,
     private val latestProvider: () -> File?,
     private val latestSnapshotProvider: () -> File?,
-    private val rtspUrl: String
+    private val webRtcService: WebRtcService
 ) : NanoHTTPD(port) {
+
+    private var pendingIceCandidates = mutableListOf<IceCandidate>()
+    private var pendingAnswer: org.json.JSONObject? = null
+    private val answerLock = Object()
 
     override fun serve(session: IHTTPSession): Response {
         if (!isAuthorized(session)) {
             return newFixedLengthResponse(Response.Status.UNAUTHORIZED, MIME_PLAINTEXT, "Unauthorized")
         }
+
         return when (session.uri) {
             "/" -> serveIndex()
-            "/video" -> serveRtspInfo()
+            "/webrtc/offer" -> handleWebRtcOffer(session)
+            "/webrtc/answer" -> handleWebRtcAnswer(session)
+            "/webrtc/ice" -> handleIceCandidate(session)
+            "/webrtc/ice-candidates" -> getPendingIceCandidates()
             "/latest" -> {
                 val latest = latestProvider()
                 if (latest == null) {
@@ -76,67 +86,307 @@ class VideoHttpServer(
         }
     }
 
+    private fun handleWebRtcOffer(session: IHTTPSession): Response {
+        return try {
+            val params = HashMap<String, String>()
+            session.parseBody(params)
+            val body = params["postData"] ?: ""
+
+            val sdpJson = org.json.JSONObject(body)
+            val sdp = sdpJson.getString("sdp")
+            val type = sdpJson.getString("type")
+
+            val sessionDescription = SessionDescription(
+                SessionDescription.Type.fromCanonicalForm(type),
+                sdp
+            )
+
+            // Set up callback for local description
+            webRtcService.onLocalSessionDescription = { answer ->
+                synchronized(answerLock) {
+                    pendingAnswer = org.json.JSONObject().apply {
+                        put("sdp", answer.description)
+                        put("type", answer.type.canonicalForm())
+                    }
+                    answerLock.notifyAll()
+                }
+            }
+
+            webRtcService.setRemoteDescription(
+                sessionDescription,
+                onSuccess = {
+                    webRtcService.createAnswer()
+                },
+                onFailure = { error ->
+                    android.util.Log.e("WebRTC", "Failed to set remote description: $error")
+                }
+            )
+
+            // Wait for answer with timeout
+            synchronized(answerLock) {
+                var waitCount = 0
+                while (pendingAnswer == null && waitCount < 50) {
+                    answerLock.wait(100)
+                    waitCount++
+                }
+            }
+
+            val answer = pendingAnswer
+            pendingAnswer = null
+
+            if (answer != null) {
+                newFixedLengthResponse(Response.Status.OK, "application/json", answer.toString())
+            } else {
+                newFixedLengthResponse(Response.Status.OK, "application/json", "{\"status\":\"processing\"}")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("WebRTC", "Error handling offer", e)
+            newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "Error: ${e.message}")
+        }
+    }
+
+    private fun handleWebRtcAnswer(session: IHTTPSession): Response {
+        return try {
+            val params = HashMap<String, String>()
+            session.parseBody(params)
+            val body = params["postData"] ?: ""
+
+            val sdpJson = org.json.JSONObject(body)
+            val sdp = sdpJson.getString("sdp")
+            val type = sdpJson.getString("type")
+
+            val sessionDescription = SessionDescription(
+                SessionDescription.Type.fromCanonicalForm(type),
+                sdp
+            )
+
+            webRtcService.setRemoteDescription(
+                sessionDescription,
+                onSuccess = {
+                    pendingIceCandidates.forEach { candidate ->
+                        webRtcService.addIceCandidate(candidate)
+                    }
+                    pendingIceCandidates.clear()
+                },
+                onFailure = { error ->
+                    android.util.Log.e("WebRTC", "Failed to set remote description: $error")
+                }
+            )
+
+            newFixedLengthResponse(Response.Status.OK, "application/json", "{\"status\":\"ok\"}")
+        } catch (e: Exception) {
+            android.util.Log.e("WebRTC", "Error handling answer", e)
+            newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "Error: ${e.message}")
+        }
+    }
+
+    private fun handleIceCandidate(session: IHTTPSession): Response {
+        return try {
+            val params = HashMap<String, String>()
+            session.parseBody(params)
+            val body = params["postData"] ?: ""
+
+            val candidateJson = org.json.JSONObject(body)
+            val candidate = candidateJson.getString("candidate")
+            val sdpMid = candidateJson.optString("sdpMid", "0")
+            val sdpMLineIndex = candidateJson.getInt("sdpMLineIndex")
+
+            val iceCandidate = IceCandidate(sdpMid, sdpMLineIndex, candidate)
+
+            webRtcService.addIceCandidate(iceCandidate)
+
+            newFixedLengthResponse(Response.Status.OK, "application/json", "{\"status\":\"ok\"}")
+        } catch (e: Exception) {
+            android.util.Log.e("WebRTC", "Error handling ICE candidate", e)
+            newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "Error: ${e.message}")
+        }
+    }
+
+    private fun getPendingIceCandidates(): Response {
+        val candidates = pendingIceCandidates.map { candidate ->
+            org.json.JSONObject().apply {
+                put("candidate", candidate.sdp)
+                put("sdpMid", candidate.sdpMid)
+                put("sdpMLineIndex", candidate.sdpMLineIndex)
+            }
+        }
+        return newFixedLengthResponse(
+            Response.Status.OK,
+            "application/json",
+            org.json.JSONArray(candidates).toString()
+        )
+    }
+
     private fun serveIndex(): Response {
+        val ip = getLocalIpAddress() ?: "0.0.0.0"
         val body = buildString {
-            append("<html><head><title>WatchDog</title></head><body>")
-            append("<h2>WatchDog</h2>")
-            append("<ul>")
-            append("<li><a href=\"${withToken("/snapshot")}\">Latest Snapshot</a></li>")
-            append("<li><a href=\"${withToken("/snapshots")}\">All Snapshots</a></li>")
-            append("<li><a href=\"${withToken("/latest")}\">Latest Recording</a></li>")
-            append("<li><a href=\"${withToken("/files")}\">All Recordings</a></li>")
-            append("<li><a href=\"${withToken("/video")}\">Live Video (RTSP)</a></li>")
-            append("</ul>")
-            append("</body></html>")
-        }
-        return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", body)
-    }
+            append("""<!DOCTYPE html>
+<html>
+<head>
+    <title>WatchDog Camera</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; }
+        h1 { color: #333; }
+        .card { background: white; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        .video-container { position: relative; background: #000; border-radius: 8px; overflow: hidden; }
+        video { width: 100%; display: block; }
+        .status { padding: 10px; background: #e3f2fd; border-radius: 4px; margin-bottom: 10px; }
+        .status.connected { background: #e8f5e9; }
+        .status.error { background: #ffebee; }
+        .btn { display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 6px; margin: 5px; }
+        .btn:hover { background: #1976D2; }
+        ul { list-style: none; padding: 0; }
+        li { padding: 8px 0; border-bottom: 1px solid #eee; }
+        a { color: #2196F3; }
+        img { max-width: 100%; border-radius: 8px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🐕 WatchDog Camera</h1>
+        
+        <div class="card">
+            <h2>📹 Live Video</h2>
+            <div id="status" class="status">Connecting...</div>
+            <div class="video-container">
+                <video id="video" autoplay playsinline></video>
+            </div>
+            <button class="btn" onclick="startStream()">Start Stream</button>
+            <button class="btn" onclick="stopStream()">Stop Stream</button>
+        </div>
 
-    private fun serveRtspInfo(): Response {
-        val body = buildString {
-            append("<html><head><title>WatchDog - Live RTSP</title>")
-            append("<style>body{font-family:sans-serif;margin:2em;}code{background:#eee;padding:4px 8px;border-radius:4px;}</style>")
-            append("</head><body>")
-            append("<h2>Live Video Stream (RTSP)</h2>")
-            append("<p>The live video stream is available via RTSP at:</p>")
-            append("<p><code>$rtspUrl</code></p>")
-            append("<h3>How to watch</h3>")
-            append("<ul>")
-            append("<li><b>VLC</b>: Media → Open Network Stream → paste the URL above</li>")
-            append("<li><b>ffplay</b>: <code>ffplay ${'$'}rtspUrl</code></li>")
-            append("<li><b>ffmpeg</b>: <code>ffmpeg -i ${'$'}rtspUrl -c copy output.mp4</code></li>")
-            append("</ul>")
+        <div class="card">
+            <h2>📸 Latest Snapshot</h2>
+            <img id="snapshot-img" src="/snapshot?token=" alt="No snapshot" onerror="this.style.display='none'">
+            <p><a href="/snapshot">View Snapshot</a></p>
+        </div>
 
-            append("<h3>Integration with Homebridge (Apple HomeKit)</h3>")
-            append("<p>To view this camera in the Apple Home app via Homebridge, install the <code>homebridge-camera-ffmpeg</code> plugin and add the following configuration to your <b>config.json</b>:</p>")
-            append("<pre style=\"background:#eee;padding:10px;border-radius:4px;overflow-x:auto;\"><code>")
+        <div class="card">
+            <h2>📁 Recordings</h2>
+            <ul id="files-list"></ul>
+            <p><a href="/files">View All Recordings</a></p>
+        </div>
+
+        <div class="card">
+            <h2>📷 All Snapshots</h2>
+            <ul id="snapshots-list"></ul>
+            <p><a href="/snapshots">View All Snapshots</a></p>
+        </div>
+    </div>
+
+    <script>
+        const pcConfig = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+        
+        let pc = null;
+        let dc = null;
+        const video = document.getElementById('video');
+        const statusEl = document.getElementById('status');
+        let ws = null;
+
+        async function startStream() {
+            statusEl.textContent = 'Connecting...';
+            statusEl.className = 'status';
             
-            // Re-format the base rtsp URL to ensure it shows exactly what needs to be pasted
-            // including potential token query strings
-            val homebridgeConfig = """
-{
-  "platforms": [
-    {
-      "platform": "Camera-ffmpeg",
-      "cameras": [
-        {
-          "name": "WatchDog Camera",
-          "videoConfig": {
-            "source": "-rtsp_transport tcp -i ${'$'}rtspUrl",
-            "vcodec": "copy",
-            "audio": false
-          }
-        }
-      ]
-    }
-  ]
-}
-            """.trimIndent()
-            append(homebridgeConfig)
-            append("</code></pre>")
+            pc = new RTCPeerConnection(pcConfig);
+            
+            pc.onicecandidate = (e) => {
+                if (e.candidate) {
+                    fetch('/webrtc/ice', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            candidate: e.candidate.candidate,
+                            sdpMid: e.candidate.sdpMid,
+                            sdpMLineIndex: e.candidate.sdpMLineIndex
+                        })
+                    });
+                }
+            };
+            
+            pc.ontrack = (e) => {
+                video.srcObject = e.streams[0];
+                statusEl.textContent = 'Connected!';
+                statusEl.className = 'status connected';
+            };
+            
+            pc.oniceconnectionstatechange = () => {
+                if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+                    statusEl.textContent = 'Connection failed';
+                    statusEl.className = 'status error';
+                }
+            };
 
-            append("<p><a href=\"${'$'}${withToken("/")}\">← Back</a></p>")
-            append("</body></html>")
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            try {
+                const response = await fetch('/webrtc/offer', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        sdp: offer.sdp,
+                        type: offer.type
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.sdp) {
+                    await pc.setRemoteDescription(new RTCSessionDescription({
+                        sdp: data.sdp,
+                        type: data.type
+                    }));
+                    statusEl.textContent = 'Stream started';
+                    statusEl.className = 'status connected';
+                } else {
+                    statusEl.textContent = data.status || 'Processing...';
+                }
+            } catch (e) {
+                statusEl.textContent = 'Error: ' + e.message;
+                statusEl.className = 'status error';
+            }
+        }
+
+        function stopStream() {
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+            video.srcObject = null;
+            statusEl.textContent = 'Stopped';
+            statusEl.className = 'status';
+        }
+
+        // Load file lists
+        fetch('/files').then(r => r.text()).then(html => {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+            const items = doc.querySelectorAll('li');
+            items.forEach(item => {
+                document.getElementById('files-list').appendChild(item);
+            });
+        });
+        
+        fetch('/snapshots').then(r => r.text()).then(html => {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+            const items = doc.querySelectorAll('li');
+            items.forEach(item => {
+                document.getElementById('snapshots-list').appendChild(item);
+            });
+        });
+
+        // Auto start
+        startStream();
+    </script>
+</body>
+</html>""")
         }
         return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", body)
     }
@@ -144,8 +394,10 @@ class VideoHttpServer(
     private fun serveFileList(): Response {
         val files = rootDir.listFiles()?.filter { it.isFile && it.extension == "mp4" } ?: emptyList()
         val body = buildString {
-            append("<html><head><title>Recordings</title></head><body>")
-            append("<h2>Recordings</h2>")
+            append("<html><head><title>Recordings</title>")
+            append("<style>body{font-family:sans-serif;margin:2em;}a{color:#2196F3;}</style>")
+            append("</head><body>")
+            append("<h2>📁 Recordings</h2>")
             if (files.isEmpty()) {
                 append("<p>No recordings yet.</p>")
             } else {
@@ -153,10 +405,11 @@ class VideoHttpServer(
                 for (file in files.sortedByDescending { it.lastModified() }) {
                     val name = file.name
                     val safeName = URLEncoder.encode(name, "UTF-8")
-                    append("<li><a href=\"${withToken("/file/$safeName")}\">$name</a> (${file.length() / 1024} KB)</li>")
+                    append("<li><a href=\"/file/$safeName\">$name</a> (${file.length() / 1024} KB)</li>")
                 }
                 append("</ul>")
             }
+            append("<p><a href=\"/\">← Back</a></p>")
             append("</body></html>")
         }
         return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", body)
@@ -166,10 +419,10 @@ class VideoHttpServer(
         val files = snapshotDir.listFiles()?.filter { it.isFile && it.extension == "jpg" } ?: emptyList()
         val body = buildString {
             append("<html><head><title>Snapshots</title>")
-            append("<style>body{font-family:sans-serif;margin:2em;}img{max-width:400px;}</style>")
+            append("<style>body{font-family:sans-serif;margin:2em;}img{max-width:300px;margin:10px;}a{color:#2196F3;}</style>")
             append("</head><body>")
-            append("<h2>Snapshots</h2>")
-            append("<p><a href=\"${'$'}${withToken("/snapshot")}\">Latest Snapshot</a></p>")
+            append("<h2>📷 Snapshots</h2>")
+            append("<p><a href=\"/snapshot\">Latest Snapshot</a></p>")
             if (files.isEmpty()) {
                 append("<p>No snapshots yet.</p>")
             } else {
@@ -177,11 +430,11 @@ class VideoHttpServer(
                 for (file in files.sortedByDescending { it.lastModified() }) {
                     val name = file.name
                     val safeName = URLEncoder.encode(name, "UTF-8")
-                    append("<li><a href=\"${withToken("/snapshot/$safeName")}\">$name</a> (${file.length() / 1024} KB)</li>")
+                    append("<li><a href=\"/snapshot/$safeName\">$name</a> (${file.length() / 1024} KB)</li>")
                 }
                 append("</ul>")
             }
-            append("<p><a href=\"${'$'}${withToken("/")}\">← Back</a></p>")
+            append("<p><a href=\"/\">← Back</a></p>")
             append("</body></html>")
         }
         return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", body)
@@ -276,15 +529,22 @@ class VideoHttpServer(
         return null
     }
 
-    private fun tokenQuery(): String {
-        if (accessToken.isBlank()) {
-            return ""
+    private fun getLocalIpAddress(): String? {
+        return try {
+            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
+            while (interfaces.hasMoreElements()) {
+                val networkInterface = interfaces.nextElement()
+                val addresses = networkInterface.inetAddresses
+                while (addresses.hasMoreElements()) {
+                    val address = addresses.nextElement()
+                    if (!address.isLoopbackAddress && address is java.net.Inet4Address) {
+                        return address.hostAddress
+                    }
+                }
+            }
+            null
+        } catch (e: Exception) {
+            null
         }
-        return "token=${URLEncoder.encode(accessToken, "UTF-8")}"
-    }
-
-    private fun withToken(path: String): String {
-        val tokenParam = tokenQuery()
-        return if (tokenParam.isBlank()) path else "$path?$tokenParam"
     }
 }

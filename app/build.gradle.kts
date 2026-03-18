@@ -94,4 +94,10 @@ dependencies {
     implementation("androidx.camera:camera-view:1.3.4")
 
     implementation("org.nanohttpd:nanohttpd:2.3.1")
+
+    // WebRTC
+    implementation("io.getstream:stream-webrtc-android:2.0.3")
+
+    // JSON
+    implementation("org.json:json:20231013")
 }
