@@ -93,7 +93,7 @@ dependencies {
     implementation("androidx.camera:camera-video:1.3.4")
     implementation("androidx.camera:camera-view:1.3.4")
 
-    implementation("org.nanohttpd:nanohttpd:2.3.1")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // WebRTC
     implementation("io.getstream:stream-webrtc-android:1.3.10")
