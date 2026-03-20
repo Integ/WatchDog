@@ -238,10 +238,10 @@ class WebRtcClient(
     }
 
     open class SimpleSdpObserver : SdpObserver {
-        override fun onCreateSuccess(p0: SessionDescription?) {}
+        override fun onCreateSuccess(sdp: SessionDescription?) {}
         override fun onSetSuccess() {}
-        override fun onCreateFailure(p0: String?) {}
-        override fun onSetFailure(p0: String?) {}
+        override fun onCreateFailure(error: String?) {}
+        override fun onSetFailure(error: String?) {}
     }
 
     private fun imageProxyToNv21(image: ImageProxy): ByteArray {
