@@ -42,7 +42,6 @@ class MainActivity : AppCompatActivity() {
 
     private var rtspServer: RtspServer? = null
     private var h264Encoder: H264Encoder? = null
-    private val encoderLock = Any()
 
     private val requestPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -98,6 +97,17 @@ class MainActivity : AppCompatActivity() {
         cameraProviderFuture.addListener({
             val cameraProvider = cameraProviderFuture.get()
 
+            h264Encoder = H264Encoder(ENCODE_WIDTH, ENCODE_HEIGHT, ENCODE_BITRATE).apply {
+                onNalUnit = { data, pts, isConfig ->
+                    rtspServer?.feedNalUnit(data, pts, isConfig)
+                }
+                onSpsPpsReady = { sps, pps ->
+                    rtspServer?.sps = sps
+                    rtspServer?.pps = pps
+                }
+                start()
+            }
+
             val preview = Preview.Builder().build().also {
                 it.setSurfaceProvider(binding.previewView.surfaceProvider)
             }
@@ -114,33 +124,12 @@ class MainActivity : AppCompatActivity() {
                 .build()
 
             imageAnalysis.setAnalyzer(analysisExecutor) { image ->
-                val rotation = image.imageInfo.rotationDegrees
                 val nv12 = yuv420ToNv12(image)
                 image.close()
 
                 if (nv12 != null) {
                     val timestampUs = image.imageInfo.timestamp / 1000 // ns → µs
-                    val rotatedNv12 = rotateNv12(nv12, image.width, image.height, rotation)
-
-                    val outWidth = if (rotation == 90 || rotation == 270) image.height else image.width
-                    val outHeight = if (rotation == 90 || rotation == 270) image.width else image.height
-
-                    synchronized(encoderLock) {
-                        if (h264Encoder == null) {
-                            h264Encoder = H264Encoder(outWidth, outHeight, ENCODE_BITRATE).apply {
-                                onNalUnit = { data, pts, isConfig ->
-                                    rtspServer?.feedNalUnit(data, pts, isConfig)
-                                }
-                                onSpsPpsReady = { sps, pps ->
-                                    rtspServer?.sps = sps
-                                    rtspServer?.pps = pps
-                                }
-                                start()
-                            }
-                        }
-                    }
-
-                    h264Encoder?.feedFrame(rotatedNv12, timestampUs)
+                    h264Encoder?.feedFrame(nv12, timestampUs)
                 }
             }
 
@@ -156,67 +145,6 @@ class MainActivity : AppCompatActivity() {
                 Log.e(TAG, "Camera bind failed", exc)
             }
         }, ContextCompat.getMainExecutor(this))
-    }
-
-    private fun rotateNv12(data: ByteArray, width: Int, height: Int, rotation: Int): ByteArray {
-        if (rotation == 0) return data
-        val out = ByteArray(data.size)
-        val frameSize = width * height
-
-        when (rotation) {
-            90 -> {
-                // rotate Y
-                for (y in 0 until height) {
-                    for (x in 0 until width) {
-                        out[x * height + height - y - 1] = data[y * width + x]
-                    }
-                }
-                // rotate UV
-                val chromaHeight = height / 2
-                val chromaWidth = width / 2
-                for (y in 0 until chromaHeight) {
-                    for (x in 0 until chromaWidth) {
-                        val outOffset = frameSize + (x * chromaHeight + chromaHeight - y - 1) * 2
-                        val inOffset = frameSize + (y * chromaWidth + x) * 2
-                        out[outOffset] = data[inOffset]
-                        out[outOffset + 1] = data[inOffset + 1]
-                    }
-                }
-            }
-            180 -> {
-                // rotate Y
-                for (i in 0 until frameSize) {
-                    out[frameSize - 1 - i] = data[i]
-                }
-                // rotate UV
-                var i = frameSize
-                while (i < data.size) {
-                    out[data.size - 2 - (i - frameSize)] = data[i]
-                    out[data.size - 1 - (i - frameSize)] = data[i + 1]
-                    i += 2
-                }
-            }
-            270 -> {
-                // rotate Y
-                for (y in 0 until height) {
-                    for (x in 0 until width) {
-                        out[(width - x - 1) * height + y] = data[y * width + x]
-                    }
-                }
-                // rotate UV
-                val chromaHeight = height / 2
-                val chromaWidth = width / 2
-                for (y in 0 until chromaHeight) {
-                    for (x in 0 until chromaWidth) {
-                        val outOffset = frameSize + ((chromaWidth - x - 1) * chromaHeight + y) * 2
-                        val inOffset = frameSize + (y * chromaWidth + x) * 2
-                        out[outOffset] = data[inOffset]
-                        out[outOffset + 1] = data[inOffset + 1]
-                    }
-                }
-            }
-        }
-        return out
     }
 
     private fun yuv420ToNv12(image: ImageProxy): ByteArray? {
@@ -266,8 +194,8 @@ class MainActivity : AppCompatActivity() {
             for (col in 0 until chromaWidth) {
                 val uIndex = uRowStart + col * uPixelStride
                 val vIndex = vRowStart + col * vPixelStride
-                nv12[uvPos++] = vBuffer.get(vIndex) // V
                 nv12[uvPos++] = uBuffer.get(uIndex) // U
+                nv12[uvPos++] = vBuffer.get(vIndex) // V
             }
         }
 
