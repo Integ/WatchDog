@@ -1,31 +1,27 @@
 # WatchDog
 
-WatchDog turns an Android phone into a security camera with local recording and LAN access.
+WatchDog turns an Android phone into a high-performance local network security camera. The app utilizes the device's camera to capture real-time video, encodes it into H.264, and streams it over the Local Area Network using the RTSP protocol. 
 
-## CI Release Signing (No Java Required)
+## Features
 
-You can create a signing keystore without installing Java by using OpenSSL to generate a PKCS12 file.
+- **Direct RTSP Streaming:** Streams live video on the standard RTSP port `8554`.
+- **Low Latency:** Achieved through direct hardware encoding without additional intermediary networking overhead.
+- **Hardware Acceleration:** Uses Android's `MediaCodec` to efficiently compress video frames to H.264.
+- **Native Resolution:** Captures and encodes in consistent landscape `1280x720` HD resolution, ensuring clear details.
 
-```bash
-# 1) Generate private key
-openssl genpkey -algorithm RSA -out watchdog.key -pkeyopt rsa_keygen_bits:2048
+## Implementation Details
 
-# 2) Create a self-signed certificate (10,000 days)
-openssl req -new -x509 -key watchdog.key -out watchdog.crt -days 10000 -subj "/CN=WatchDog"
+The core functionality of WatchDog comprises three primary components:
+1. **Camera Acquisition:** Uses the Android `CameraX` library to configure a landscape orientation layout. An `ImageAnalysis` analyzer is utilized to siphon raw YUV_420_888 frames at 30 FPS.
+2. **Video Encoding:** A custom `yuv420ToNv12` converter processes the camera frames, and feeds them into the system's `MediaCodec` initialized in `ByteBuffer` input mode. The encoder strips the frame configuration and packages them into NAL units containing SPS and PPS packets.
+3. **RTSP Server:** A lightweight, pure-Kotlin RTSP (RFC 2326) Server implementation handles negotiation protocols (OPTIONS, DESCRIBE, SETUP, PLAY). It packetizes the encoded NAL units using FU-A fragmentation over RTP/UDP (or TCP interleaved) for video consumption.
 
-# 3) Build a PKCS12 keystore
-openssl pkcs12 -export -inkey watchdog.key -in watchdog.crt -out watchdog-release.p12 -name watchdog -passout pass:YOUR_PASSWORD
-```
+## Installation
 
-Base64-encode the keystore and add GitHub Secrets:
+You can download the latest compiled `.apk` directly from the **[GitHub Releases](../../releases)** page.
 
-```bash
-base64 -i watchdog-release.p12 > watchdog-release.p12.b64
-```
-
-Secrets to set in GitHub:
-
-- `SIGNING_STORE_FILE_B64` = contents of `watchdog-release.p12.b64`
-- `SIGNING_STORE_PASSWORD` = `YOUR_PASSWORD`
-- `SIGNING_KEY_ALIAS` = `watchdog`
-- `SIGNING_KEY_PASSWORD` = `YOUR_PASSWORD`
+1. Download the `watchdog.apk` file on your Android device.
+2. Ensure you have allowed "Install from Unknown Sources" in your Android settings.
+3. Install and open the app. Accept the required camera permissions.
+4. Note the RTSP address displayed on the screen (e.g., `rtsp://<device_ip>:8554/video`).
+5. Open the stream using a media player (e.g., VLC, QuickTime, or ffmpeg) connected to the same local network.

@@ -42,6 +42,7 @@ class MainActivity : AppCompatActivity() {
 
     private var rtspServer: RtspServer? = null
     private var h264Encoder: H264Encoder? = null
+    private var nv12Buffer: ByteArray? = null
 
     private val requestPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -167,7 +168,12 @@ class MainActivity : AppCompatActivity() {
         val vRowStride = vPlane.rowStride
         val vPixelStride = vPlane.pixelStride
 
-        val nv12 = ByteArray(width * height + width * height / 2)
+        val requiredSize = width * height + width * height / 2
+        var nv12 = nv12Buffer
+        if (nv12 == null || nv12.size != requiredSize) {
+            nv12 = ByteArray(requiredSize)
+            nv12Buffer = nv12
+        }
 
         // Copy Y plane
         var yPos = 0
