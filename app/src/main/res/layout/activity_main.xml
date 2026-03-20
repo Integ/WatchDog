@@ -31,36 +31,16 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
-        <EditText
-            android:id="@+id/etServerUrl"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="@string/server_url_hint"
-            android:textColorHint="#99FFFFFF"
-            android:textColor="@color/white"
-            android:inputType="textUri"
-            android:backgroundTint="@color/accent"
-            android:textSize="14sp" />
-
         <TextView
-            android:id="@+id/txtStatus"
+            android:id="@+id/txtServer"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:textColor="#99FFFFFF"
-            android:textSize="12sp"
-            android:text="" />
-
-        <Button
-            android:id="@+id/btnCall"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:layout_marginTop="12dp"
-            android:text="@string/call"
-            android:textSize="14sp"
-            android:textAllCaps="false"
-            android:backgroundTint="@color/accent"
-            android:textColor="@color/black" />
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:text=""
+            android:textStyle="bold"
+            android:textAlignment="center"/>
     </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>

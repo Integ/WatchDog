@@ -94,10 +94,4 @@ dependencies {
     implementation("androidx.camera:camera-view:1.3.4")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-
-    // WebRTC
-    implementation("io.getstream:stream-webrtc-android:1.3.10")
-
-    // JSON
-    implementation("org.json:json:20231013")
 }
