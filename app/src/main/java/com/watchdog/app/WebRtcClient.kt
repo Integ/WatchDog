@@ -199,6 +199,7 @@ class WebRtcClient(
         val constraints = MediaConstraints()
         peerConnection?.createOffer(object : SimpleSdpObserver() {
             override fun onCreateSuccess(sdp: SessionDescription?) {
+                super.onCreateSuccess(sdp)
                 if (sdp == null) return
                 peerConnection?.setLocalDescription(SimpleSdpObserver(), sdp)
                 
@@ -208,6 +209,9 @@ class WebRtcClient(
                     put("sdp", sdp.description)
                 }
                 webSocket?.send(json.toString())
+                mainHandler.post {
+                    onStatusChange("Offer sent, waiting for answer...")
+                }
             }
         }, constraints)
     }
@@ -238,10 +242,18 @@ class WebRtcClient(
     }
 
     open class SimpleSdpObserver : SdpObserver {
-        override fun onCreateSuccess(sdp: SessionDescription?) {}
-        override fun onSetSuccess() {}
-        override fun onCreateFailure(error: String?) {}
-        override fun onSetFailure(error: String?) {}
+        override fun onCreateSuccess(sdp: SessionDescription?) {
+            Log.i(TAG, "SdpObserver: onCreateSuccess")
+        }
+        override fun onSetSuccess() {
+            Log.i(TAG, "SdpObserver: onSetSuccess")
+        }
+        override fun onCreateFailure(error: String?) {
+            Log.e(TAG, "SdpObserver: onCreateFailure - $error")
+        }
+        override fun onSetFailure(error: String?) {
+            Log.e(TAG, "SdpObserver: onSetFailure - $error")
+        }
     }
 
     private fun imageProxyToNv21(image: ImageProxy): ByteArray {
