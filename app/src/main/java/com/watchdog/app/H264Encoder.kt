@@ -93,20 +93,25 @@ class H264Encoder(
     }
 
     fun stop() {
+        val mc = codec
+        codec = null
         running = false
         outputThread?.interrupt()
         outputThread?.join(2000)
         outputThread = null
+        onNalUnit = null
+        onSpsPpsReady = null
+        sps = null
+        pps = null
 
         try {
-            codec?.stop()
+            mc?.stop()
         } catch (_: Exception) {
         }
         try {
-            codec?.release()
+            mc?.release()
         } catch (_: Exception) {
         }
-        codec = null
         Log.i(TAG, "Encoder stopped")
     }
 

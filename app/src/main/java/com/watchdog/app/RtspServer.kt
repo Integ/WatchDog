@@ -155,8 +155,10 @@ class RtspServer(
             while (running && !socket.isClosed) {
                 val request = readRtspRequest(reader) ?: break
                 val response = handleRequest(request, session)
-                output.write(response.toByteArray(Charsets.UTF_8))
-                output.flush()
+                synchronized(session) {
+                    output.write(response.toByteArray(Charsets.UTF_8))
+                    output.flush()
+                }
             }
         } catch (_: Exception) {
             // Client disconnected
@@ -282,7 +284,6 @@ class RtspServer(
         }
 
         val baseUri = request.uri.split("?")[0]
-        val controlUri = if (baseUri.endsWith("/")) "${baseUri}trackID=0" else "$baseUri/trackID=0"
         return "$RTSP_VERSION 200 OK\r\n" +
                 "CSeq: $cseq\r\n" +
                 "Content-Type: application/sdp\r\n" +
