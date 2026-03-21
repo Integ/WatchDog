@@ -181,8 +181,10 @@ class H264Encoder(
                         ppsBytes = bytes
                         Log.i(TAG, "PPS cached from csd-1 (${bytes.size} bytes)")
                     }
-                    if (spsBytes != null && ppsBytes != null) {
-                        onSpsPpsReady?.invoke(spsBytes, ppsBytes)
+                    val readySps = spsBytes
+                    val readyPps = ppsBytes
+                    if (readySps != null && readyPps != null) {
+                        onSpsPpsReady?.invoke(readySps, readyPps)
                     }
                 }
             }

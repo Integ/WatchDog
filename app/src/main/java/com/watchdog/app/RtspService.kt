@@ -149,15 +149,17 @@ class RtspService : LifecycleService() {
         wakeLock = null
     }
 
-    private fun startRtspServerIfNeeded() = synchronized(streamingLock) {
-        if (rtspServer != null) {
-            return
-        }
+    private fun startRtspServerIfNeeded() {
+        synchronized(streamingLock) {
+            if (rtspServer != null) {
+                return
+            }
 
-        rtspServer = RtspServer(RTSP_PORT, "").also { server ->
-            server.start()
+            rtspServer = RtspServer(RTSP_PORT, "").also { server ->
+                server.start()
+            }
+            Log.i(TAG, "RTSP server started")
         }
-        Log.i(TAG, "RTSP server started")
     }
 
     private fun ensureEncoderForFrame(width: Int, height: Int): H264Encoder = synchronized(streamingLock) {
