@@ -36,8 +36,8 @@ class RtspService : LifecycleService() {
         private const val NOTIFICATION_CHANNEL_ID = "RtspServiceChannel"
         private const val NOTIFICATION_ID = 1
 
-        private const val ENCODE_WIDTH = 1280
-        private const val ENCODE_HEIGHT = 720
+        private const val PREFERRED_WIDTH = 1280
+        private const val PREFERRED_HEIGHT = 720
         private const val ENCODE_BITRATE = 5_000_000
         private const val RTSP_PORT = 8554
     }
@@ -50,7 +50,10 @@ class RtspService : LifecycleService() {
 
     private var rtspServer: RtspServer? = null
     private var h264Encoder: H264Encoder? = null
-    private var nv12Buffer: ByteArray? = null
+    private var encoderInputBuffer: ByteArray? = null
+    private var encoderInputMode: H264Encoder.InputMode? = null
+    private var encoderWidth = 0
+    private var encoderHeight = 0
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var previewUseCase: Preview? = null
@@ -72,7 +75,7 @@ class RtspService : LifecycleService() {
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification())
 
-        startStreamingPipeline()
+        startRtspServerIfNeeded()
         startCameraAnalysis()
     }
 
@@ -94,7 +97,7 @@ class RtspService : LifecycleService() {
         releaseWakeLock()
         analysisExecutor.shutdownNow()
         pendingSurfaceProvider = null
-        nv12Buffer = null
+        encoderInputBuffer = null
         super.onDestroy()
     }
 
@@ -146,15 +149,37 @@ class RtspService : LifecycleService() {
         wakeLock = null
     }
 
-    private fun startStreamingPipeline() = synchronized(streamingLock) {
-        stopStreamingPipelineLocked()
-        Log.i(TAG, "Starting RTSP server and encoder")
+    private fun startRtspServerIfNeeded() = synchronized(streamingLock) {
+        if (rtspServer != null) {
+            return
+        }
 
         rtspServer = RtspServer(RTSP_PORT, "").also { server ->
             server.start()
         }
+        Log.i(TAG, "RTSP server started")
+    }
 
-        h264Encoder = H264Encoder(ENCODE_WIDTH, ENCODE_HEIGHT, ENCODE_BITRATE).apply {
+    private fun ensureEncoderForFrame(width: Int, height: Int): H264Encoder = synchronized(streamingLock) {
+        startRtspServerIfNeeded()
+
+        val existing = h264Encoder
+        if (existing != null && encoderWidth == width && encoderHeight == height) {
+            return existing
+        }
+
+        if (existing != null) {
+            Log.i(
+                TAG,
+                "Camera frame size changed ${encoderWidth}x${encoderHeight} -> ${width}x${height}, restarting encoder"
+            )
+        } else {
+            Log.i(TAG, "Starting encoder for camera frame size ${width}x${height}")
+        }
+
+        stopEncoderLocked()
+
+        return H264Encoder(width, height, ENCODE_BITRATE).apply {
             onNalUnit = { data, pts, isConfig ->
                 rtspServer?.feedNalUnit(data, pts, isConfig)
             }
@@ -163,21 +188,30 @@ class RtspService : LifecycleService() {
                 rtspServer?.pps = pps
             }
             start()
+            h264Encoder = this
+            encoderWidth = width
+            encoderHeight = height
+            encoderInputMode = inputMode
+            encoderInputBuffer = null
+            Log.i(TAG, "Encoder ready: ${width}x${height}, mode=$inputMode")
         }
     }
 
     private fun stopStreamingPipeline() = synchronized(streamingLock) {
-        stopStreamingPipelineLocked()
+        stopEncoderLocked()
+        rtspServer?.stop()
+        rtspServer = null
     }
 
-    private fun stopStreamingPipelineLocked() {
+    private fun stopEncoderLocked() {
         h264Encoder?.onNalUnit = null
         h264Encoder?.onSpsPpsReady = null
         h264Encoder?.stop()
         h264Encoder = null
-
-        rtspServer?.stop()
-        rtspServer = null
+        encoderWidth = 0
+        encoderHeight = 0
+        encoderInputMode = null
+        encoderInputBuffer = null
     }
 
     private fun startCameraAnalysis() {
@@ -201,7 +235,7 @@ class RtspService : LifecycleService() {
         val resolutionSelector = ResolutionSelector.Builder()
             .setResolutionStrategy(
                 ResolutionStrategy(
-                    Size(ENCODE_WIDTH, ENCODE_HEIGHT),
+                    Size(PREFERRED_WIDTH, PREFERRED_HEIGHT),
                     ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
                 )
             )
@@ -214,9 +248,13 @@ class RtspService : LifecycleService() {
                 analysis.setAnalyzer(analysisExecutor) { image ->
                     val timestampUs = image.imageInfo.timestamp / 1000
                     try {
-                        val nv12 = yuv420ToNv12(image)
-                        if (nv12 != null) {
-                            h264Encoder?.feedFrame(nv12, timestampUs)
+                        val encoder = ensureEncoderForFrame(image.width, image.height)
+                        val input = yuv420ToEncoderInput(
+                            image = image,
+                            inputMode = encoder.inputMode
+                        )
+                        if (input != null) {
+                            encoder.feedFrame(input, timestampUs)
                         }
                     } catch (exc: Exception) {
                         Log.e(TAG, "Frame analysis failed", exc)
@@ -288,7 +326,10 @@ class RtspService : LifecycleService() {
             .build()
     }
 
-    private fun yuv420ToNv12(image: ImageProxy): ByteArray? {
+    private fun yuv420ToEncoderInput(
+        image: ImageProxy,
+        inputMode: H264Encoder.InputMode
+    ): ByteArray? {
         val width = image.width
         val height = image.height
         if (image.format != ImageFormat.YUV_420_888) return null
@@ -309,10 +350,16 @@ class RtspService : LifecycleService() {
         val vPixelStride = vPlane.pixelStride
 
         val requiredSize = width * height + width * height / 2
-        var nv12 = nv12Buffer
-        if (nv12 == null || nv12.size != requiredSize) {
-            nv12 = ByteArray(requiredSize)
-            nv12Buffer = nv12
+        var output = encoderInputBuffer
+        if (
+            output == null ||
+            output.size != requiredSize ||
+            encoderWidth != width ||
+            encoderHeight != height ||
+            encoderInputMode != inputMode
+        ) {
+            output = ByteArray(requiredSize)
+            encoderInputBuffer = output
         }
 
         var yPos = 0
@@ -320,30 +367,52 @@ class RtspService : LifecycleService() {
             val yRowStart = row * yRowStride
             if (yPixelStride == 1) {
                 yBuffer.position(yRowStart)
-                yBuffer.get(nv12, yPos, width)
+                yBuffer.get(output, yPos, width)
                 yPos += width
             } else {
                 for (col in 0 until width) {
-                    nv12[yPos++] = yBuffer.get(yRowStart + col * yPixelStride)
+                    output[yPos++] = yBuffer.get(yRowStart + col * yPixelStride)
                 }
             }
         }
 
         val chromaHeight = height / 2
         val chromaWidth = width / 2
-        var uvPos = width * height
-        for (row in 0 until chromaHeight) {
-            val uRowStart = row * uRowStride
-            val vRowStart = row * vRowStride
-            for (col in 0 until chromaWidth) {
-                val uIndex = uRowStart + col * uPixelStride
-                val vIndex = vRowStart + col * vPixelStride
-                nv12[uvPos++] = uBuffer.get(uIndex)
-                nv12[uvPos++] = vBuffer.get(vIndex)
+        val uPlaneOffset = width * height
+
+        when (inputMode) {
+            H264Encoder.InputMode.YUV420_PLANAR -> {
+                val vPlaneOffset = uPlaneOffset + chromaWidth * chromaHeight
+                var uPos = uPlaneOffset
+                var vPos = vPlaneOffset
+                for (row in 0 until chromaHeight) {
+                    val uRowStart = row * uRowStride
+                    val vRowStart = row * vRowStride
+                    for (col in 0 until chromaWidth) {
+                        val uIndex = uRowStart + col * uPixelStride
+                        val vIndex = vRowStart + col * vPixelStride
+                        output[uPos++] = uBuffer.get(uIndex)
+                        output[vPos++] = vBuffer.get(vIndex)
+                    }
+                }
+            }
+
+            H264Encoder.InputMode.YUV420_SEMIPLANAR -> {
+                var uvPos = uPlaneOffset
+                for (row in 0 until chromaHeight) {
+                    val uRowStart = row * uRowStride
+                    val vRowStart = row * vRowStride
+                    for (col in 0 until chromaWidth) {
+                        val uIndex = uRowStart + col * uPixelStride
+                        val vIndex = vRowStart + col * vPixelStride
+                        output[uvPos++] = uBuffer.get(uIndex)
+                        output[uvPos++] = vBuffer.get(vIndex)
+                    }
+                }
             }
         }
 
-        return nv12
+        return output
     }
 
     private fun getLocalIpAddress(): String? {
