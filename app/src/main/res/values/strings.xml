@@ -1,5 +1,8 @@
 <resources>
     <string name="app_name">WatchDog</string>
+    <string name="camera_label">Camera</string>
+    <string name="camera_loading">Loading cameras...</string>
+    <string name="camera_unavailable">No available cameras</string>
     <string name="call">Call</string>
     <string name="hang_up">Hang Up</string>
     <string name="server_url_hint">Server URL (e.g. ws://192.168.1.100:8080)</string>

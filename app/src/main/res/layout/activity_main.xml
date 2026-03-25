@@ -32,10 +32,29 @@
         app:layout_constraintEnd_toEndOf="parent">
 
         <TextView
-            android:id="@+id/txtServer"
+            android:id="@+id/lblCamera"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/camera_label"
+            android:textAllCaps="true"
+            android:textColor="#B3FFFFFF"
+            android:textSize="12sp" />
+
+        <Spinner
+            android:id="@+id/spinnerCamera"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
+            android:background="#1FFFFFFF"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="8dp"
+            android:spinnerMode="dropdown" />
+
+        <TextView
+            android:id="@+id/txtServer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
             android:textColor="#FFFFFF"
             android:textSize="16sp"
             android:text=""

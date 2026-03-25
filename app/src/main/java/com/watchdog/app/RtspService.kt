@@ -13,6 +13,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import android.util.Size
+import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -29,12 +30,19 @@ import java.net.NetworkInterface
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
+data class CameraOption(
+    val id: String,
+    val label: String
+)
+
 class RtspService : LifecycleService() {
 
     companion object {
         private const val TAG = "RtspService"
         private const val NOTIFICATION_CHANNEL_ID = "RtspServiceChannel"
         private const val NOTIFICATION_ID = 1
+        private const val PREFS_NAME = "rtsp_service_prefs"
+        private const val KEY_SELECTED_CAMERA_ID = "selected_camera_id"
 
         private const val PREFERRED_WIDTH = 1280
         private const val PREFERRED_HEIGHT = 720
@@ -59,9 +67,16 @@ class RtspService : LifecycleService() {
     private var previewUseCase: Preview? = null
     private var imageAnalysisUseCase: ImageAnalysis? = null
     private var pendingSurfaceProvider: Preview.SurfaceProvider? = null
+    private var availableCameras: List<CameraOption> = emptyList()
+    private var selectedCameraId: String? = null
+    private var cameraStateListener: CameraStateListener? = null
 
     @Volatile
     private var isDestroyed = false
+
+    interface CameraStateListener {
+        fun onCameraOptionsChanged(options: List<CameraOption>, selectedCameraId: String?)
+    }
 
     inner class LocalBinder : Binder() {
         fun getService(): RtspService = this@RtspService
@@ -71,6 +86,7 @@ class RtspService : LifecycleService() {
         super.onCreate()
         Log.i(TAG, "onCreate")
         analysisExecutor = Executors.newSingleThreadExecutor()
+        selectedCameraId = loadSelectedCameraId()
         acquireWakeLock()
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification())
@@ -129,6 +145,46 @@ class RtspService : LifecycleService() {
     fun getRtspUrl(): String {
         val ip = getLocalIpAddress() ?: "unknown"
         return "rtsp://$ip:$RTSP_PORT/video"
+    }
+
+    fun getAvailableCameras(): List<CameraOption> = availableCameras
+
+    fun getSelectedCameraId(): String? = selectedCameraId
+
+    fun setCameraStateListener(listener: CameraStateListener?) {
+        cameraStateListener = listener
+        notifyCameraState(listener)
+    }
+
+    fun setSelectedCamera(cameraId: String): Boolean {
+        if (cameraId == selectedCameraId) {
+            return true
+        }
+
+        if (availableCameras.isNotEmpty() && availableCameras.none { it.id == cameraId }) {
+            return false
+        }
+
+        val previousCameraId = selectedCameraId
+        selectedCameraId = cameraId
+        saveSelectedCameraId(cameraId)
+        synchronized(streamingLock) {
+            stopEncoderLocked()
+        }
+
+        try {
+            rebindCameraUseCases()
+            Log.i(TAG, "Switched to camera $cameraId")
+        } catch (exc: Exception) {
+            selectedCameraId = previousCameraId
+            saveSelectedCameraId(previousCameraId)
+            runCatching { rebindCameraUseCases() }
+            Log.e(TAG, "Failed to switch camera to $cameraId", exc)
+            return false
+        }
+
+        notifyCameraState()
+        return true
     }
 
     private fun acquireWakeLock() {
@@ -226,6 +282,7 @@ class RtspService : LifecycleService() {
             try {
                 cameraProvider = cameraProviderFuture.get()
                 imageAnalysisUseCase = buildImageAnalysisUseCase()
+                refreshAvailableCameras()
                 rebindCameraUseCases()
             } catch (exc: Exception) {
                 Log.e(TAG, "Camera initialization failed", exc)
@@ -270,6 +327,7 @@ class RtspService : LifecycleService() {
     private fun rebindCameraUseCases() {
         val provider = cameraProvider ?: return
         val analysis = imageAnalysisUseCase ?: return
+        refreshAvailableCameras()
         val useCases = mutableListOf<UseCase>(analysis)
 
         previewUseCase?.let { preview ->
@@ -280,7 +338,7 @@ class RtspService : LifecycleService() {
         provider.unbindAll()
         provider.bindToLifecycle(
             this,
-            CameraSelector.DEFAULT_BACK_CAMERA,
+            buildSelectedCameraSelector(),
             *useCases.toTypedArray()
         )
     }
@@ -295,6 +353,114 @@ class RtspService : LifecycleService() {
             previewUseCase = null
             imageAnalysisUseCase = null
             cameraProvider = null
+            availableCameras = emptyList()
+        }
+    }
+
+    private fun refreshAvailableCameras() {
+        val provider = cameraProvider ?: return
+        val cameras = provider.availableCameraInfos
+            .mapNotNull { cameraInfo ->
+                val cameraId = runCatching { Camera2CameraInfo.from(cameraInfo).cameraId }
+                    .getOrNull()
+                    ?: return@mapNotNull null
+
+                CameraOption(
+                    id = cameraId,
+                    label = buildCameraLabel(cameraInfo.lensFacing, cameraId)
+                )
+            }
+            .distinctBy(CameraOption::id)
+            .sortedWith(
+                compareBy<CameraOption>(
+                    { cameraSortKey(it.label) },
+                    { it.label }
+                )
+            )
+
+        availableCameras = cameras
+
+        val resolvedSelection = resolveSelectedCameraId(cameras)
+        if (resolvedSelection != selectedCameraId) {
+            selectedCameraId = resolvedSelection
+            saveSelectedCameraId(resolvedSelection)
+            synchronized(streamingLock) {
+                stopEncoderLocked()
+            }
+        }
+
+        notifyCameraState()
+    }
+
+    private fun resolveSelectedCameraId(options: List<CameraOption>): String? {
+        val current = selectedCameraId
+        if (current != null && options.any { it.id == current }) {
+            return current
+        }
+
+        return options.firstOrNull { it.label.startsWith("Rear camera") }?.id
+            ?: options.firstOrNull()?.id
+    }
+
+    private fun buildSelectedCameraSelector(): CameraSelector {
+        val targetCameraId = selectedCameraId
+        if (targetCameraId == null) {
+            return CameraSelector.DEFAULT_BACK_CAMERA
+        }
+
+        return CameraSelector.Builder()
+            .addCameraFilter { cameraInfos ->
+                cameraInfos.filter { cameraInfo ->
+                    runCatching { Camera2CameraInfo.from(cameraInfo).cameraId == targetCameraId }
+                        .getOrDefault(false)
+                }
+            }
+            .build()
+    }
+
+    private fun buildCameraLabel(lensFacing: Int?, cameraId: String): String {
+        val facingLabel = when (lensFacing) {
+            CameraSelector.LENS_FACING_BACK -> "Rear camera"
+            CameraSelector.LENS_FACING_FRONT -> "Front camera"
+            CameraSelector.LENS_FACING_EXTERNAL -> "External camera"
+            else -> "Camera"
+        }
+        return "$facingLabel (ID $cameraId)"
+    }
+
+    private fun cameraSortKey(label: String): Int {
+        return when {
+            label.startsWith("Rear camera") -> 0
+            label.startsWith("Front camera") -> 1
+            label.startsWith("External camera") -> 2
+            else -> 3
+        }
+    }
+
+    private fun loadSelectedCameraId(): String? {
+        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_SELECTED_CAMERA_ID, null)
+    }
+
+    private fun saveSelectedCameraId(cameraId: String?) {
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .apply {
+                if (cameraId.isNullOrBlank()) {
+                    remove(KEY_SELECTED_CAMERA_ID)
+                } else {
+                    putString(KEY_SELECTED_CAMERA_ID, cameraId)
+                }
+            }
+            .apply()
+    }
+
+    private fun notifyCameraState(listener: CameraStateListener? = cameraStateListener) {
+        val targetListener = listener ?: return
+        val optionsSnapshot = availableCameras
+        val selectedCameraSnapshot = selectedCameraId
+        ContextCompat.getMainExecutor(this).execute {
+            targetListener.onCameraOptionsChanged(optionsSnapshot, selectedCameraSnapshot)
         }
     }
 

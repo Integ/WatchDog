@@ -9,6 +9,9 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.view.View
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -28,17 +31,40 @@ class MainActivity : AppCompatActivity() {
     private var isBound = false
     private var shouldStartService = false
     private var isStartRequested = false
+    private var cameraOptions: List<CameraOption> = emptyList()
+    private var isUpdatingCameraSelection = false
+
+    private val cameraAdapter by lazy {
+        ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, mutableListOf()).apply {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+    }
+
+    private val cameraStateListener = object : RtspService.CameraStateListener {
+        override fun onCameraOptionsChanged(
+            options: List<CameraOption>,
+            selectedCameraId: String?
+        ) {
+            renderCameraOptions(options, selectedCameraId)
+        }
+    }
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             val binder = service as? RtspService.LocalBinder ?: return
             rtspService = binder.getService()
             isBound = true
+            rtspService?.setCameraStateListener(cameraStateListener)
+            renderCameraOptions(
+                rtspService?.getAvailableCameras().orEmpty(),
+                rtspService?.getSelectedCameraId()
+            )
             updateServerUi()
             rtspService?.attachPreview(binding.previewView.surfaceProvider)
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
+            rtspService?.setCameraStateListener(null)
             rtspService = null
             isBound = false
         }
@@ -61,6 +87,7 @@ class MainActivity : AppCompatActivity() {
 
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        setupCameraSelector()
 
         if (allPermissionsGranted()) {
             shouldStartService = true
@@ -78,6 +105,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onStop() {
+        rtspService?.setCameraStateListener(null)
         rtspService?.detachPreview()
         if (isBound) {
             unbindService(serviceConnection)
@@ -104,9 +132,83 @@ class MainActivity : AppCompatActivity() {
         isBound = bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
     }
 
+    private fun setupCameraSelector() {
+        binding.spinnerCamera.adapter = cameraAdapter
+        binding.spinnerCamera.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: AdapterView<*>?,
+                view: View?,
+                position: Int,
+                id: Long
+            ) {
+                if (isUpdatingCameraSelection) {
+                    return
+                }
+
+                val option = cameraOptions.getOrNull(position) ?: return
+                val service = rtspService ?: return
+                if (option.id == service.getSelectedCameraId()) {
+                    return
+                }
+
+                if (service.setSelectedCamera(option.id)) {
+                    updateServerUi()
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+
+        renderCameraOptions(emptyList(), null)
+    }
+
+    private fun renderCameraOptions(
+        options: List<CameraOption>,
+        selectedCameraId: String?
+    ) {
+        cameraOptions = options
+        isUpdatingCameraSelection = true
+        cameraAdapter.clear()
+
+        when {
+            options.isEmpty() -> {
+                cameraAdapter.add(getString(R.string.camera_loading))
+                binding.spinnerCamera.isEnabled = false
+                binding.spinnerCamera.alpha = 0.65f
+            }
+
+            else -> {
+                cameraAdapter.addAll(options.map(CameraOption::label))
+                binding.spinnerCamera.isEnabled = options.size > 1
+                binding.spinnerCamera.alpha = 1f
+
+                val selectedIndex = options.indexOfFirst { it.id == selectedCameraId }
+                    .takeIf { it >= 0 }
+                    ?: 0
+                binding.spinnerCamera.setSelection(selectedIndex, false)
+            }
+        }
+
+        cameraAdapter.notifyDataSetChanged()
+        isUpdatingCameraSelection = false
+        updateServerUi()
+    }
+
     private fun updateServerUi() {
         val rtspUrl = rtspService?.getRtspUrl() ?: "unknown"
-        binding.txtServer.text = "RTSP Server URL:\n$rtspUrl\n(Runs in background when screen is off)"
+        val selectedCameraLabel = cameraOptions
+            .firstOrNull { it.id == rtspService?.getSelectedCameraId() }
+            ?.label
+            ?: getString(
+                if (cameraOptions.isEmpty()) {
+                    R.string.camera_loading
+                } else {
+                    R.string.camera_unavailable
+                }
+            )
+
+        binding.txtServer.text =
+            "RTSP Server URL:\n$rtspUrl\nCamera: $selectedCameraLabel\n(Runs in background when screen is off)"
     }
 
     private fun allPermissionsGranted(): Boolean {
