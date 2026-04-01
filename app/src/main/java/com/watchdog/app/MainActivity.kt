@@ -49,6 +49,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val videoInfoListener = object : RtspService.VideoInfoListener {
+        override fun onVideoInfoChanged(info: VideoStreamInfo) {
+            binding.txtStreamInfo.text = "${info.width}x${info.height} @ ${info.frameRate}fps"
+            binding.txtStreamInfo.visibility = View.VISIBLE
+        }
+    }
+
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             val binder = service as? RtspService.LocalBinder ?: return

@@ -31,6 +31,7 @@ class H264Encoder(
 
     var onNalUnit: ((data: ByteArray, presentationTimeUs: Long, isConfig: Boolean) -> Unit)? = null
     var onSpsPpsReady: ((sps: ByteArray, pps: ByteArray) -> Unit)? = null
+    var onVideoFormatChanged: ((width: Int, height: Int, frameRate: Int) -> Unit)? = null
 
     val inputMode: InputMode
         get() = selectedInputMode
@@ -165,6 +166,10 @@ class H264Encoder(
                 } else if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     val newFormat = mc.outputFormat
                     Log.i(TAG, "Output format changed: $newFormat")
+                    val actualWidth = newFormat.getInteger(MediaFormat.KEY_WIDTH)
+                    val actualHeight = newFormat.getInteger(MediaFormat.KEY_HEIGHT)
+                    val actualFrameRate = newFormat.getInteger(MediaFormat.KEY_FRAME_RATE)
+                    onVideoFormatChanged?.invoke(actualWidth, actualHeight, actualFrameRate)
                     var spsBytes: ByteArray? = null
                     var ppsBytes: ByteArray? = null
                     newFormat.getByteBuffer("csd-0")?.let { csd0 ->

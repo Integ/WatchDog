@@ -35,6 +35,12 @@ data class CameraOption(
     val label: String
 )
 
+data class VideoStreamInfo(
+    val width: Int,
+    val height: Int,
+    val frameRate: Int
+)
+
 class RtspService : LifecycleService() {
 
     companion object {
@@ -77,6 +83,12 @@ class RtspService : LifecycleService() {
     interface CameraStateListener {
         fun onCameraOptionsChanged(options: List<CameraOption>, selectedCameraId: String?)
     }
+
+    interface VideoInfoListener {
+        fun onVideoInfoChanged(info: VideoStreamInfo)
+    }
+
+    private var videoInfoListener: VideoInfoListener? = null
 
     inner class LocalBinder : Binder() {
         fun getService(): RtspService = this@RtspService
@@ -154,6 +166,20 @@ class RtspService : LifecycleService() {
     fun setCameraStateListener(listener: CameraStateListener?) {
         cameraStateListener = listener
         notifyCameraState(listener)
+    }
+
+    fun setVideoInfoListener(listener: VideoInfoListener?) {
+        videoInfoListener = listener
+    }
+
+    private var currentVideoInfo: VideoStreamInfo? = null
+
+    private fun notifyVideoInfo(info: VideoStreamInfo) {
+        if (info == currentVideoInfo) {
+            return
+        }
+        currentVideoInfo = info
+        videoInfoListener?.onVideoInfoChanged(info)
     }
 
     fun setSelectedCamera(cameraId: String): Boolean {
@@ -245,6 +271,9 @@ class RtspService : LifecycleService() {
                 rtspServer?.sps = sps
                 rtspServer?.pps = pps
             }
+            onVideoFormatChanged = { w, h, fps ->
+                notifyVideoInfo(VideoStreamInfo(w, h, fps))
+            }
             start()
             h264Encoder = this
             encoderWidth = width
@@ -264,12 +293,14 @@ class RtspService : LifecycleService() {
     private fun stopEncoderLocked() {
         h264Encoder?.onNalUnit = null
         h264Encoder?.onSpsPpsReady = null
+        h264Encoder?.onVideoFormatChanged = null
         h264Encoder?.stop()
         h264Encoder = null
         encoderWidth = 0
         encoderHeight = 0
         encoderInputMode = null
         encoderInputBuffer = null
+        currentVideoInfo = null
     }
 
     private fun startCameraAnalysis() {
