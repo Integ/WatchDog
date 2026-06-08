@@ -255,11 +255,11 @@ class RtspServer(
         val spsData = sps?.let(::stripStartCode)
         val ppsData = pps?.let(::stripStartCode)
 
-        val spsB64 = if (!spsData.isNullOrEmpty()) {
+        val spsB64 = if (spsData != null && spsData.isNotEmpty()) {
             Base64.encodeToString(spsData, Base64.NO_WRAP)
         } else ""
 
-        val ppsB64 = if (!ppsData.isNullOrEmpty()) {
+        val ppsB64 = if (ppsData != null && ppsData.isNotEmpty()) {
             Base64.encodeToString(ppsData, Base64.NO_WRAP)
         } else ""
 
