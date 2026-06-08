@@ -16,12 +16,13 @@ class H264Encoder(
     val width: Int,
     val height: Int,
     private val bitRate: Int = 2_000_000,
-    private val frameRate: Int = 30
+    private val frameRate: Int = 15
 ) {
     companion object {
         private const val TAG = "H264Encoder"
         private const val MIME = MediaFormat.MIMETYPE_VIDEO_AVC
-        private const val I_FRAME_INTERVAL = 1
+        private const val I_FRAME_INTERVAL_SECONDS = 2
+        private const val CODEC_TIMEOUT_US = 5_000L
     }
 
     enum class InputMode {
@@ -38,6 +39,7 @@ class H264Encoder(
 
     private var codec: MediaCodec? = null
     private var outputThread: Thread? = null
+    private val inputLock = Any()
 
     @Volatile
     private var running = false
@@ -52,61 +54,78 @@ class H264Encoder(
 
     fun start() {
         val mc = MediaCodec.createEncoderByType(MIME)
-        val capabilities = mc.codecInfo.getCapabilitiesForType(MIME)
-        val colorFormat = chooseColorFormat(capabilities.colorFormats)
-        selectedInputMode = when (colorFormat) {
-            MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar,
-            MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible -> InputMode.YUV420_PLANAR
-            MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar -> InputMode.YUV420_SEMIPLANAR
-            else -> error("Unsupported selected color format: $colorFormat")
-        }
+        try {
+            val capabilities = mc.codecInfo.getCapabilitiesForType(MIME)
+            val colorFormat = chooseColorFormat(capabilities.colorFormats)
+            selectedInputMode = when (colorFormat) {
+                MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar,
+                MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible -> InputMode.YUV420_PLANAR
+                MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar -> InputMode.YUV420_SEMIPLANAR
+                else -> error("Unsupported selected color format: $colorFormat")
+            }
 
-        val format = MediaFormat.createVideoFormat(MIME, width, height).apply {
-            setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
-            setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL)
-            setInteger(MediaFormat.KEY_COLOR_FORMAT, colorFormat)
-        }
+            val format = MediaFormat.createVideoFormat(MIME, width, height).apply {
+                setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
+                setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL_SECONDS)
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, colorFormat)
+            }
 
-        mc.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        mc.start()
-        codec = mc
-        running = true
+            mc.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            mc.start()
+            codec = mc
+            running = true
 
-        outputThread = Thread({
-            drainLoop(mc)
-        }, "H264Encoder-drain").apply {
-            isDaemon = true
-            start()
+            outputThread = Thread({
+                drainLoop(mc)
+            }, "H264Encoder-drain").apply {
+                isDaemon = true
+                start()
+            }
+            Log.i(
+                TAG,
+                "Encoder started ${width}x${height} @ ${frameRate}fps, " +
+                    "${bitRate / 1000}kbps, colorFormat=$colorFormat, inputMode=$selectedInputMode"
+            )
+        } catch (exc: Exception) {
+            runCatching { mc.release() }
+            throw exc
         }
-        Log.i(
-            TAG,
-            "Encoder started ${width}x${height} @ ${bitRate / 1000}kbps, colorFormat=$colorFormat, inputMode=$selectedInputMode"
-        )
     }
 
-    fun feedFrame(data: ByteArray, presentationTimeUs: Long) {
-        val mc = codec ?: return
-        if (!running) return
+    fun feedFrame(data: ByteArray, presentationTimeUs: Long): Boolean = synchronized(inputLock) {
+        val mc = codec ?: return false
+        if (!running) return false
 
         try {
-            val inputIndex = mc.dequeueInputBuffer(10_000)
+            val inputIndex = mc.dequeueInputBuffer(0)
             if (inputIndex >= 0) {
-                val inputBuffer = mc.getInputBuffer(inputIndex) ?: return
+                val inputBuffer = mc.getInputBuffer(inputIndex) ?: return false
+                if (inputBuffer.capacity() < data.size) {
+                    Log.e(TAG, "Encoder input buffer is too small: ${inputBuffer.capacity()} < ${data.size}")
+                    mc.queueInputBuffer(inputIndex, 0, 0, presentationTimeUs, 0)
+                    return false
+                }
                 inputBuffer.clear()
-                val size = minOf(data.size, inputBuffer.capacity())
-                inputBuffer.put(data, 0, size)
-                mc.queueInputBuffer(inputIndex, 0, size, presentationTimeUs, 0)
+                inputBuffer.put(data)
+                mc.queueInputBuffer(inputIndex, 0, data.size, presentationTimeUs, 0)
+                true
+            } else {
+                false
             }
         } catch (e: Exception) {
-            Log.w(TAG, "feedFrame error", e)
+            if (running) {
+                Log.w(TAG, "feedFrame error", e)
+            }
+            false
         }
     }
 
     fun stop() {
-        val mc = codec
-        codec = null
-        running = false
+        val mc = synchronized(inputLock) {
+            running = false
+            codec.also { codec = null }
+        }
         outputThread?.interrupt()
         outputThread?.join(2000)
         outputThread = null
@@ -148,7 +167,7 @@ class H264Encoder(
         val info = MediaCodec.BufferInfo()
         try {
             while (running) {
-                val index = mc.dequeueOutputBuffer(info, 10_000)
+                val index = mc.dequeueOutputBuffer(info, CODEC_TIMEOUT_US)
                 if (index >= 0) {
                     val buffer = mc.getOutputBuffer(index)
                     if (buffer != null && info.size > 0) {
@@ -168,7 +187,11 @@ class H264Encoder(
                     Log.i(TAG, "Output format changed: $newFormat")
                     val actualWidth = newFormat.getInteger(MediaFormat.KEY_WIDTH)
                     val actualHeight = newFormat.getInteger(MediaFormat.KEY_HEIGHT)
-                    val actualFrameRate = newFormat.getInteger(MediaFormat.KEY_FRAME_RATE)
+                    val actualFrameRate = if (newFormat.containsKey(MediaFormat.KEY_FRAME_RATE)) {
+                        newFormat.getInteger(MediaFormat.KEY_FRAME_RATE)
+                    } else {
+                        frameRate
+                    }
                     onVideoFormatChanged?.invoke(actualWidth, actualHeight, actualFrameRate)
                     var spsBytes: ByteArray? = null
                     var ppsBytes: ByteArray? = null

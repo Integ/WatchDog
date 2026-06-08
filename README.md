@@ -1,27 +1,50 @@
 # WatchDog
 
-WatchDog turns an Android phone into a high-performance local network security camera. The app utilizes the device's camera to capture real-time video, encodes it into H.264, and streams it over the Local Area Network using the RTSP protocol. 
+WatchDog turns an Android 8.0+ phone into a local RTSP camera intended for
+Homebridge and other LAN clients. It captures camera frames, uses the device
+H.264 hardware encoder, and serves the stream without a cloud dependency.
 
 ## Features
 
-- **Direct RTSP Streaming:** Streams live video on the standard RTSP port `8554`.
-- **Low Latency:** Achieved through direct hardware encoding without additional intermediary networking overhead.
-- **Hardware Acceleration:** Uses Android's `MediaCodec` to efficiently compress video frames to H.264.
-- **Native Resolution:** Captures and encodes in consistent landscape `1280x720` HD resolution, ensuring clear details.
+- RTSP video at `rtsp://<device-ip>:8554/video`
+- 1280x720, 15fps, and 2Mbps defaults for sustained operation
+- Automatic thermal throttling to 10, 5, or 2fps on Android 10+
+- Hardware H.264 encoding through Android `MediaCodec`
+- RTP over UDP and RTSP interleaved TCP
+- Foreground camera service for streaming with the screen off
+- Camera selection with a lightweight preview UI
 
-## Implementation Details
+## Long-running behavior
 
-The core functionality of WatchDog comprises three primary components:
-1. **Camera Acquisition:** Uses the Android `CameraX` library to configure a landscape orientation layout. An `ImageAnalysis` analyzer is utilized to siphon raw YUV_420_888 frames at 30 FPS.
-2. **Video Encoding:** A custom `yuv420ToNv12` converter processes the camera frames, and feeds them into the system's `MediaCodec` initialized in `ByteBuffer` input mode. The encoder strips the frame configuration and packages them into NAL units containing SPS and PPS packets.
-3. **RTSP Server:** A lightweight, pure-Kotlin RTSP (RFC 2326) Server implementation handles negotiation protocols (OPTIONS, DESCRIBE, SETUP, PLAY). It packetizes the encoded NAL units using FU-A fragmentation over RTP/UDP (or TCP interleaved) for video consumption.
+CameraX keeps only the newest frame, and frames above the active rate limit are
+discarded before YUV conversion. A reusable encoder input buffer avoids
+per-frame input allocation, while non-blocking codec submission prevents camera
+backpressure from accumulating in memory.
+
+Each RTSP/TCP client has a bounded output queue. A client that cannot consume
+video quickly enough is disconnected instead of blocking the camera and
+hardware encoder pipeline. The server accepts up to four concurrent clients.
+
+The preview does not force the display to remain on. Leaving the app or turning
+off the screen removes the preview while the foreground service continues to
+stream.
+
+## Homebridge
+
+Use the URL shown in the app as the camera source:
+
+```text
+rtsp://192.168.1.50:8554/video
+```
+
+For the lowest device load, configure Homebridge to consume this stream
+directly and avoid requesting an output frame rate higher than 15fps.
 
 ## Installation
 
-You can download the latest compiled `.apk` directly from the **[GitHub Releases](../../releases)** page.
+1. Install the APK on an Android 8.0 or newer device.
+2. Open WatchDog and grant camera permission.
+3. Select the desired camera.
+4. Add the displayed RTSP URL to Homebridge, VLC, or ffmpeg.
 
-1. Download the `watchdog.apk` file on your Android device.
-2. Ensure you have allowed "Install from Unknown Sources" in your Android settings.
-3. Install and open the app. Accept the required camera permissions.
-4. Note the RTSP address displayed on the screen (e.g., `rtsp://<device_ip>:8554/video`).
-5. Open the stream using a media player (e.g., VLC, QuickTime, or ffmpeg) connected to the same local network.
+Both the Android device and the RTSP client must be on the same local network.

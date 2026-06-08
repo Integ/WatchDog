@@ -3,7 +3,7 @@
     <string name="camera_label">Camera</string>
     <string name="camera_loading">Loading cameras...</string>
     <string name="camera_unavailable">No available cameras</string>
-    <string name="call">Call</string>
-    <string name="hang_up">Hang Up</string>
-    <string name="server_url_hint">Server URL (e.g. ws://192.168.1.100:8080)</string>
+    <string name="camera_preview">Camera preview</string>
+    <string name="stream_info_format">%1$dx%2$d @ %3$dfps</string>
+    <string name="server_status_format">RTSP Server URL:\n%1$s\nCamera: %2$s\nRuns in background when the screen is off</string>
 </resources>

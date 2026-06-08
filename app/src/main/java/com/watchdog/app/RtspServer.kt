@@ -10,6 +10,8 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.math.min
 
@@ -28,6 +30,10 @@ class RtspServer(
         private const val RTSP_VERSION = "RTSP/1.0"
         private const val MAX_RTP_PAYLOAD = 1400
         private const val RTP_HEADER_SIZE = 12
+        private const val MAX_CLIENTS = 4
+        private const val MAX_HEADERS = 64
+        private const val CLIENT_TIMEOUT_MS = 90_000
+        private const val TCP_QUEUE_CAPACITY = 256
     }
 
     private var serverSocket: ServerSocket? = null
@@ -45,9 +51,6 @@ class RtspServer(
     /** Set by encoder once PPS is available. */
     @Volatile
     var pps: ByteArray? = null
-
-    private var rtpSequenceNumber = 0
-    private var ssrc = (System.nanoTime() and 0xFFFFFFFFL).toInt()
 
     fun start() {
         running = true
@@ -84,7 +87,7 @@ class RtspServer(
         // Strip start codes and split into individual NAL units
         val nalUnits = splitNalUnits(data)
         for (nal in nalUnits) {
-            if (isConfig) {
+            if (isConfig || nal.isEmpty()) {
                 continue
             }
             val timestamp = (presentationTimeUs * 90 / 1000).toInt() // 90 kHz clock
@@ -107,20 +110,10 @@ class RtspServer(
         val spsData = sps
         val ppsData = pps
         if (spsData != null) {
-            val spsNal = if (spsData.size > 4 && spsData[0] == 0.toByte() &&
-                spsData[1] == 0.toByte() && spsData[2] == 0.toByte() && spsData[3] == 1.toByte()
-            ) {
-                spsData.copyOfRange(4, spsData.size)
-            } else spsData
-            sendSingleNalRtp(client, spsNal, timestamp)
+            sendSingleNalRtp(client, stripStartCode(spsData), timestamp)
         }
         if (ppsData != null) {
-            val ppsNal = if (ppsData.size > 4 && ppsData[0] == 0.toByte() &&
-                ppsData[1] == 0.toByte() && ppsData[2] == 0.toByte() && ppsData[3] == 1.toByte()
-            ) {
-                ppsData.copyOfRange(4, ppsData.size)
-            } else ppsData
-            sendSingleNalRtp(client, ppsNal, timestamp)
+            sendSingleNalRtp(client, stripStartCode(ppsData), timestamp)
         }
     }
 
@@ -130,6 +123,14 @@ class RtspServer(
         try {
             while (running) {
                 val socket = serverSocket?.accept() ?: break
+                if (clients.size >= MAX_CLIENTS) {
+                    Log.w(TAG, "Rejecting RTSP client: client limit reached")
+                    socket.close()
+                    continue
+                }
+                socket.tcpNoDelay = true
+                socket.keepAlive = true
+                socket.soTimeout = CLIENT_TIMEOUT_MS
                 Thread({
                     handleClient(socket)
                 }, "RtspClient-${socket.inetAddress.hostAddress}").apply {
@@ -159,9 +160,17 @@ class RtspServer(
                     output.write(response.toByteArray(Charsets.UTF_8))
                     output.flush()
                 }
+                if (request.method == "PLAY") {
+                    session.playing = true
+                    Log.i(TAG, "Client PLAY: ${socket.inetAddress.hostAddress}")
+                }
             }
-        } catch (_: Exception) {
-            // Client disconnected
+        } catch (_: SocketTimeoutException) {
+            Log.i(TAG, "Client timed out: ${socket.inetAddress.hostAddress}")
+        } catch (exc: Exception) {
+            if (running && !socket.isClosed) {
+                Log.w(TAG, "RTSP client error: ${socket.inetAddress.hostAddress}", exc)
+            }
         } finally {
             session.close()
             clients.remove(session)
@@ -178,7 +187,8 @@ class RtspServer(
         val uri = parts[1]
 
         val headers = mutableMapOf<String, String>()
-        while (true) {
+        var headerCount = 0
+        while (headerCount < MAX_HEADERS) {
             val line = reader.readLine() ?: break
             if (line.isEmpty()) break
             val colonIndex = line.indexOf(':')
@@ -187,13 +197,14 @@ class RtspServer(
                 val value = line.substring(colonIndex + 1).trim()
                 headers[key] = value
             }
+            headerCount++
         }
 
         return RtspRequest(method, uri, headers)
     }
 
     private fun handleRequest(request: RtspRequest, session: ClientSession): String {
-        val cseq = request.headers["CSeq"] ?: "0"
+        val cseq = request.header("CSeq") ?: "0"
 
         // Token authentication (session-based: authenticate once on DESCRIBE,
         // then allow SETUP/PLAY/TEARDOWN without re-checking the token,
@@ -241,30 +252,24 @@ class RtspServer(
     }
 
     private fun handleDescribe(request: RtspRequest, cseq: String): String {
-        val spsData = sps
-        val ppsData = pps
+        val spsData = sps?.let(::stripStartCode)
+        val ppsData = pps?.let(::stripStartCode)
 
-        val spsB64 = if (spsData != null && spsData.size > 4) {
-            Base64.encodeToString(
-                spsData.copyOfRange(4, spsData.size),
-                Base64.NO_WRAP
-            )
+        val spsB64 = if (!spsData.isNullOrEmpty()) {
+            Base64.encodeToString(spsData, Base64.NO_WRAP)
         } else ""
 
-        val ppsB64 = if (ppsData != null && ppsData.size > 4) {
-            Base64.encodeToString(
-                ppsData.copyOfRange(4, ppsData.size),
-                Base64.NO_WRAP
-            )
+        val ppsB64 = if (!ppsData.isNullOrEmpty()) {
+            Base64.encodeToString(ppsData, Base64.NO_WRAP)
         } else ""
 
         // Profile-level-id from SPS header (3 bytes after NAL type byte)
-        val profileLevelId = if (spsData != null && spsData.size > 7) {
+        val profileLevelId = if (spsData != null && spsData.size >= 4) {
             String.format(
                 "%02X%02X%02X",
-                spsData[5].toInt() and 0xFF,
-                spsData[6].toInt() and 0xFF,
-                spsData[7].toInt() and 0xFF
+                spsData[1].toInt() and 0xFF,
+                spsData[2].toInt() and 0xFF,
+                spsData[3].toInt() and 0xFF
             )
         } else "42C01F" // Baseline profile, level 3.1 fallback
 
@@ -298,7 +303,7 @@ class RtspServer(
         session: ClientSession,
         cseq: String
     ): String {
-        val transport = request.headers["Transport"] ?: ""
+        val transport = request.header("Transport") ?: ""
 
         // Check if TCP Interleaved is requested
         val isTcp = transport.contains("interleaved=")
@@ -316,7 +321,8 @@ class RtspServer(
             session.isTcpInterleaved = true
             session.tcpChannelRtp = tcpChannelRtp
             session.outputStream = session.socket.getOutputStream()
-            
+            session.startTcpSender()
+
             transportReply = "RTP/AVP/TCP;unicast;interleaved=$tcpChannelRtp-$tcpChannelRtcp"
         } else {
             // Parse client_port from Transport header for UDP
@@ -353,29 +359,6 @@ class RtspServer(
     }
 
     private fun handlePlay(session: ClientSession, cseq: String): String {
-        session.playing = true
-        Log.i(TAG, "Client PLAY: ${session.socket.inetAddress.hostAddress}")
-
-        // Send SPS & PPS as first RTP packets so client can initialize decoder
-        val spsData = sps
-        val ppsData = pps
-        if (spsData != null) {
-            val spsNal = if (spsData.size > 4 && spsData[0] == 0.toByte() &&
-                spsData[1] == 0.toByte() && spsData[2] == 0.toByte() && spsData[3] == 1.toByte()
-            ) {
-                spsData.copyOfRange(4, spsData.size)
-            } else spsData
-            sendSingleNalRtp(session, spsNal, 0)
-        }
-        if (ppsData != null) {
-            val ppsNal = if (ppsData.size > 4 && ppsData[0] == 0.toByte() &&
-                ppsData[1] == 0.toByte() && ppsData[2] == 0.toByte() && ppsData[3] == 1.toByte()
-            ) {
-                ppsData.copyOfRange(4, ppsData.size)
-            } else ppsData
-            sendSingleNalRtp(session, ppsNal, 0)
-        }
-
         return "$RTSP_VERSION 200 OK\r\n" +
                 "CSeq: $cseq\r\n" +
                 "Session: ${session.sessionId}\r\n" +
@@ -385,7 +368,6 @@ class RtspServer(
 
     private fun handleTeardown(session: ClientSession, cseq: String): String {
         session.playing = false
-        session.close()
         return "$RTSP_VERSION 200 OK\r\n" +
                 "CSeq: $cseq\r\n" +
                 "\r\n"
@@ -413,7 +395,7 @@ class RtspServer(
 
     private fun sendSingleNalRtp(client: ClientSession, nal: ByteArray, timestamp: Int) {
         val packet = ByteArray(RTP_HEADER_SIZE + nal.size)
-        writeRtpHeader(packet, marker = true, timestamp = timestamp)
+        writeRtpHeader(client, packet, marker = true, timestamp = timestamp)
         System.arraycopy(nal, 0, packet, RTP_HEADER_SIZE, nal.size)
         sendRtpData(client, packet)
     }
@@ -437,7 +419,7 @@ class RtspServer(
             if (isEnd) fuHeader = fuHeader or 0x40   // E bit
 
             val packet = ByteArray(RTP_HEADER_SIZE + 2 + chunkSize)
-            writeRtpHeader(packet, marker = isEnd, timestamp = timestamp)
+            writeRtpHeader(client, packet, marker = isEnd, timestamp = timestamp)
             packet[RTP_HEADER_SIZE] = fuIndicator
             packet[RTP_HEADER_SIZE + 1] = fuHeader.toByte()
             System.arraycopy(nal, offset, packet, RTP_HEADER_SIZE + 2, chunkSize)
@@ -448,9 +430,14 @@ class RtspServer(
         }
     }
 
-    @Synchronized
-    private fun writeRtpHeader(packet: ByteArray, marker: Boolean, timestamp: Int) {
-        val seq = rtpSequenceNumber++
+    private fun writeRtpHeader(
+        client: ClientSession,
+        packet: ByteArray,
+        marker: Boolean,
+        timestamp: Int
+    ) {
+        val seq = client.nextSequenceNumber()
+        val ssrc = client.ssrc
 
         // V=2, P=0, X=0, CC=0
         packet[0] = 0x80.toByte()
@@ -474,21 +461,9 @@ class RtspServer(
     private fun sendRtpData(client: ClientSession, rtpPacket: ByteArray) {
         try {
             if (client.isTcpInterleaved) {
-                // RFC 2326 Section 10.12 Embedded (Interleaved) Binary Data
-                // Format: Magic '$' (1 byte) | Channel ID (1 byte) | Length (2 bytes) | RTP Packet
-                val out = client.outputStream ?: return
-                val length = rtpPacket.size
-                val header = ByteArray(4)
-                header[0] = 0x24.toByte() // '$'
-                header[1] = client.tcpChannelRtp.toByte()
-                header[2] = (length shr 8).toByte()
-                header[3] = (length and 0xFF).toByte()
-
-                // Synchronize on the client session to prevent mixed writes (requests and RTP)
-                synchronized(client) {
-                    out.write(header)
-                    out.write(rtpPacket)
-                    out.flush()
+                if (!client.enqueueTcpPacket(rtpPacket)) {
+                    Log.w(TAG, "Closing slow RTSP/TCP client")
+                    client.close()
                 }
             } else {
                 val address = client.clientAddress ?: return
@@ -508,31 +483,78 @@ class RtspServer(
      * 00 00 00 01 start codes) into individual NAL units (without start codes).
      */
     private fun splitNalUnits(data: ByteArray): List<ByteArray> {
-        val starts = mutableListOf<Int>()
+        val starts = mutableListOf<Pair<Int, Int>>()
         var i = 0
-        while (i <= data.size - 4) {
-            if (data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
-                data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte()
-            ) {
-                starts.add(i + 4) // index of first byte after start code
-                i += 4
-            } else {
-                i++
+        while (i <= data.size - 3) {
+            val startCodeLength = when {
+                i <= data.size - 4 &&
+                    data[i] == 0.toByte() &&
+                    data[i + 1] == 0.toByte() &&
+                    data[i + 2] == 0.toByte() &&
+                    data[i + 3] == 1.toByte() -> 4
+                data[i] == 0.toByte() &&
+                    data[i + 1] == 0.toByte() &&
+                    data[i + 2] == 1.toByte() -> 3
+                else -> 0
             }
+            if (startCodeLength > 0) {
+                starts.add(i to startCodeLength)
+                i += startCodeLength
+                continue
+            }
+            i++
         }
         if (starts.isEmpty()) {
-            // No start code found — treat entire data as single NAL
-            return listOf(data)
+            return splitLengthPrefixedNalUnits(data)
         }
         val result = mutableListOf<ByteArray>()
         for (j in starts.indices) {
-            val nalStart = starts[j]
-            val nalEnd = if (j + 1 < starts.size) starts[j + 1] - 4 else data.size
+            val nalStart = starts[j].first + starts[j].second
+            val nalEnd = if (j + 1 < starts.size) starts[j + 1].first else data.size
             if (nalEnd > nalStart) {
                 result.add(data.copyOfRange(nalStart, nalEnd))
             }
         }
         return result
+    }
+
+    private fun splitLengthPrefixedNalUnits(data: ByteArray): List<ByteArray> {
+        if (data.size < 5) {
+            return listOf(data)
+        }
+
+        val result = mutableListOf<ByteArray>()
+        var offset = 0
+        while (offset + 4 <= data.size) {
+            val length =
+                ((data[offset].toInt() and 0xFF) shl 24) or
+                    ((data[offset + 1].toInt() and 0xFF) shl 16) or
+                    ((data[offset + 2].toInt() and 0xFF) shl 8) or
+                    (data[offset + 3].toInt() and 0xFF)
+            offset += 4
+            if (length <= 0 || offset + length > data.size) {
+                return listOf(data)
+            }
+            result.add(data.copyOfRange(offset, offset + length))
+            offset += length
+        }
+        return if (offset == data.size && result.isNotEmpty()) result else listOf(data)
+    }
+
+    private fun stripStartCode(data: ByteArray): ByteArray {
+        val offset = when {
+            data.size >= 4 &&
+                data[0] == 0.toByte() &&
+                data[1] == 0.toByte() &&
+                data[2] == 0.toByte() &&
+                data[3] == 1.toByte() -> 4
+            data.size >= 3 &&
+                data[0] == 0.toByte() &&
+                data[1] == 0.toByte() &&
+                data[2] == 1.toByte() -> 3
+            else -> 0
+        }
+        return if (offset == 0) data else data.copyOfRange(offset, data.size)
     }
 
     private fun buildResponse(code: Int, reason: String, cseq: String): String {
@@ -547,13 +569,21 @@ class RtspServer(
         val method: String,
         val uri: String,
         val headers: Map<String, String>
-    )
+    ) {
+        fun header(name: String): String? {
+            return headers.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
+        }
+    }
 
     class ClientSession(val socket: Socket) {
         val sessionId: String = (System.nanoTime() / 1000).toString()
+        val ssrc: Int = (System.nanoTime() xor socket.hashCode().toLong()).toInt()
+        private var rtpSequenceNumber: Int = 0
         var isTcpInterleaved: Boolean = false
         var tcpChannelRtp: Int = 0
         var outputStream: OutputStream? = null
+        private val tcpQueue = ArrayBlockingQueue<ByteArray>(TCP_QUEUE_CAPACITY)
+        private var tcpSenderThread: Thread? = null
 
         var clientRtpPort: Int = 0
         var clientRtcpPort: Int = 0
@@ -564,8 +594,49 @@ class RtspServer(
         @Volatile
         var playing: Boolean = false
 
+        @Synchronized
+        fun nextSequenceNumber(): Int = rtpSequenceNumber++
+
+        fun startTcpSender() {
+            if (tcpSenderThread != null) {
+                return
+            }
+            tcpSenderThread = Thread({
+                try {
+                    while (!socket.isClosed) {
+                        val packet = tcpQueue.take()
+                        val out = outputStream ?: break
+                        val length = packet.size
+                        val header = byteArrayOf(
+                            0x24,
+                            tcpChannelRtp.toByte(),
+                            (length shr 8).toByte(),
+                            length.toByte()
+                        )
+                        synchronized(this) {
+                            out.write(header)
+                            out.write(packet)
+                            out.flush()
+                        }
+                    }
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                } catch (_: Exception) {
+                    close()
+                }
+            }, "RtspClient-sender-${socket.inetAddress.hostAddress}").apply {
+                isDaemon = true
+                start()
+            }
+        }
+
+        fun enqueueTcpPacket(packet: ByteArray): Boolean = tcpQueue.offer(packet)
+
         fun close() {
             playing = false
+            tcpSenderThread?.interrupt()
+            tcpSenderThread = null
+            tcpQueue.clear()
             try {
                 rtpSocket?.close()
             } catch (_: Exception) {

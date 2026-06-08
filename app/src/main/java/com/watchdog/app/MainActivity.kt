@@ -51,7 +51,12 @@ class MainActivity : AppCompatActivity() {
 
     private val videoInfoListener = object : RtspService.VideoInfoListener {
         override fun onVideoInfoChanged(info: VideoStreamInfo) {
-            binding.txtStreamInfo.text = "${info.width}x${info.height} @ ${info.frameRate}fps"
+            binding.txtStreamInfo.text = getString(
+                R.string.stream_info_format,
+                info.width,
+                info.height,
+                info.frameRate
+            )
             binding.txtStreamInfo.visibility = View.VISIBLE
         }
     }
@@ -62,6 +67,7 @@ class MainActivity : AppCompatActivity() {
             rtspService = binder.getService()
             isBound = true
             rtspService?.setCameraStateListener(cameraStateListener)
+            rtspService?.setVideoInfoListener(videoInfoListener)
             renderCameraOptions(
                 rtspService?.getAvailableCameras().orEmpty(),
                 rtspService?.getSelectedCameraId()
@@ -72,6 +78,7 @@ class MainActivity : AppCompatActivity() {
 
         override fun onServiceDisconnected(name: ComponentName?) {
             rtspService?.setCameraStateListener(null)
+            rtspService?.setVideoInfoListener(null)
             rtspService = null
             isBound = false
         }
@@ -113,6 +120,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         rtspService?.setCameraStateListener(null)
+        rtspService?.setVideoInfoListener(null)
         rtspService?.detachPreview()
         if (isBound) {
             unbindService(serviceConnection)
@@ -214,8 +222,11 @@ class MainActivity : AppCompatActivity() {
                 }
             )
 
-        binding.txtServer.text =
-            "RTSP Server URL:\n$rtspUrl\nCamera: $selectedCameraLabel\n(Runs in background when screen is off)"
+        binding.txtServer.text = getString(
+            R.string.server_status_format,
+            rtspUrl,
+            selectedCameraLabel
+        )
     }
 
     private fun allPermissionsGranted(): Boolean {

@@ -22,6 +22,7 @@ import androidx.camera.core.UseCase
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
@@ -52,7 +53,11 @@ class RtspService : LifecycleService() {
 
         private const val PREFERRED_WIDTH = 1280
         private const val PREFERRED_HEIGHT = 720
-        private const val ENCODE_BITRATE = 5_000_000
+        private const val ENCODE_BITRATE = 2_000_000
+        private const val NORMAL_FRAME_RATE = 15
+        private const val WARM_FRAME_RATE = 10
+        private const val HOT_FRAME_RATE = 5
+        private const val CRITICAL_FRAME_RATE = 2
         private const val RTSP_PORT = 8554
     }
 
@@ -61,6 +66,13 @@ class RtspService : LifecycleService() {
 
     private lateinit var analysisExecutor: ExecutorService
     private var wakeLock: PowerManager.WakeLock? = null
+    private var thermalMonitor: ThermalMonitor? = null
+
+    @Volatile
+    private var targetFrameRate = NORMAL_FRAME_RATE
+
+    private var lastAcceptedFrameTimestampNs = 0L
+    private var encoderRetryAfterTimestampNs = 0L
 
     private var rtspServer: RtspServer? = null
     private var h264Encoder: H264Encoder? = null
@@ -88,6 +100,7 @@ class RtspService : LifecycleService() {
         fun onVideoInfoChanged(info: VideoStreamInfo)
     }
 
+    @Volatile
     private var videoInfoListener: VideoInfoListener? = null
 
     inner class LocalBinder : Binder() {
@@ -100,6 +113,7 @@ class RtspService : LifecycleService() {
         analysisExecutor = Executors.newSingleThreadExecutor()
         selectedCameraId = loadSelectedCameraId()
         acquireWakeLock()
+        registerThermalStatusListener()
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification())
 
@@ -122,6 +136,7 @@ class RtspService : LifecycleService() {
         Log.i(TAG, "onDestroy")
         stopCamera()
         stopStreamingPipeline()
+        unregisterThermalStatusListener()
         releaseWakeLock()
         analysisExecutor.shutdownNow()
         pendingSurfaceProvider = null
@@ -170,8 +185,18 @@ class RtspService : LifecycleService() {
 
     fun setVideoInfoListener(listener: VideoInfoListener?) {
         videoInfoListener = listener
+        currentVideoInfo?.let { info ->
+            if (listener != null) {
+                ContextCompat.getMainExecutor(this).execute {
+                    if (videoInfoListener === listener) {
+                        listener.onVideoInfoChanged(info)
+                    }
+                }
+            }
+        }
     }
 
+    @Volatile
     private var currentVideoInfo: VideoStreamInfo? = null
 
     private fun notifyVideoInfo(info: VideoStreamInfo) {
@@ -179,7 +204,12 @@ class RtspService : LifecycleService() {
             return
         }
         currentVideoInfo = info
-        videoInfoListener?.onVideoInfoChanged(info)
+        val listener = videoInfoListener ?: return
+        ContextCompat.getMainExecutor(this).execute {
+            if (videoInfoListener === listener) {
+                listener.onVideoInfoChanged(info)
+            }
+        }
     }
 
     fun setSelectedCamera(cameraId: String): Boolean {
@@ -231,6 +261,43 @@ class RtspService : LifecycleService() {
         wakeLock = null
     }
 
+    private fun registerThermalStatusListener() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return
+        }
+
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        thermalMonitor = ThermalMonitor(powerManager) { status ->
+            updateTargetFrameRate(status)
+        }
+    }
+
+    private fun unregisterThermalStatusListener() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return
+        }
+
+        thermalMonitor?.close()
+        thermalMonitor = null
+    }
+
+    private fun updateTargetFrameRate(thermalStatus: Int) {
+        val newFrameRate = when {
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.Q -> NORMAL_FRAME_RATE
+            thermalStatus >= PowerManager.THERMAL_STATUS_CRITICAL -> CRITICAL_FRAME_RATE
+            thermalStatus >= PowerManager.THERMAL_STATUS_SEVERE -> HOT_FRAME_RATE
+            thermalStatus >= PowerManager.THERMAL_STATUS_MODERATE -> WARM_FRAME_RATE
+            else -> NORMAL_FRAME_RATE
+        }
+        if (targetFrameRate != newFrameRate) {
+            targetFrameRate = newFrameRate
+            Log.i(TAG, "Thermal status=$thermalStatus, capture limited to ${newFrameRate}fps")
+            currentVideoInfo?.let { info ->
+                notifyVideoInfo(info.copy(frameRate = newFrameRate))
+            }
+        }
+    }
+
     private fun startRtspServerIfNeeded() {
         synchronized(streamingLock) {
             if (rtspServer != null) {
@@ -263,7 +330,12 @@ class RtspService : LifecycleService() {
 
         stopEncoderLocked()
 
-        return H264Encoder(width, height, ENCODE_BITRATE).apply {
+        return H264Encoder(
+            width = width,
+            height = height,
+            bitRate = ENCODE_BITRATE,
+            frameRate = NORMAL_FRAME_RATE
+        ).apply {
             onNalUnit = { data, pts, isConfig ->
                 rtspServer?.feedNalUnit(data, pts, isConfig)
             }
@@ -272,7 +344,7 @@ class RtspService : LifecycleService() {
                 rtspServer?.pps = pps
             }
             onVideoFormatChanged = { w, h, fps ->
-                notifyVideoInfo(VideoStreamInfo(w, h, fps))
+                notifyVideoInfo(VideoStreamInfo(w, h, minOf(fps, targetFrameRate)))
             }
             start()
             h264Encoder = this
@@ -301,6 +373,8 @@ class RtspService : LifecycleService() {
         encoderInputMode = null
         encoderInputBuffer = null
         currentVideoInfo = null
+        lastAcceptedFrameTimestampNs = 0L
+        encoderRetryAfterTimestampNs = 0L
     }
 
     private fun startCameraAnalysis() {
@@ -336,23 +410,40 @@ class RtspService : LifecycleService() {
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build().also { analysis ->
                 analysis.setAnalyzer(analysisExecutor) { image ->
-                    val timestampUs = image.imageInfo.timestamp / 1000
+                    val timestampNs = image.imageInfo.timestamp
                     try {
+                        if (!shouldProcessFrame(timestampNs)) {
+                            return@setAnalyzer
+                        }
+                        if (timestampNs < encoderRetryAfterTimestampNs) {
+                            return@setAnalyzer
+                        }
                         val encoder = ensureEncoderForFrame(image.width, image.height)
                         val input = yuv420ToEncoderInput(
                             image = image,
                             inputMode = encoder.inputMode
                         )
                         if (input != null) {
-                            encoder.feedFrame(input, timestampUs)
+                            encoder.feedFrame(input, timestampNs / 1000)
                         }
                     } catch (exc: Exception) {
+                        encoderRetryAfterTimestampNs = timestampNs + 5_000_000_000L
                         Log.e(TAG, "Frame analysis failed", exc)
                     } finally {
                         image.close()
                     }
                 }
             }
+    }
+
+    private fun shouldProcessFrame(timestampNs: Long): Boolean {
+        val minimumIntervalNs = 1_000_000_000L / targetFrameRate.coerceAtLeast(1)
+        val elapsedNs = timestampNs - lastAcceptedFrameTimestampNs
+        if (lastAcceptedFrameTimestampNs != 0L && elapsedNs in 0 until minimumIntervalNs) {
+            return false
+        }
+        lastAcceptedFrameTimestampNs = timestampNs
+        return true
     }
 
     private fun rebindCameraUseCases() {
@@ -491,7 +582,9 @@ class RtspService : LifecycleService() {
         val optionsSnapshot = availableCameras
         val selectedCameraSnapshot = selectedCameraId
         ContextCompat.getMainExecutor(this).execute {
-            targetListener.onCameraOptionsChanged(optionsSnapshot, selectedCameraSnapshot)
+            if (cameraStateListener === targetListener) {
+                targetListener.onCameraOptionsChanged(optionsSnapshot, selectedCameraSnapshot)
+            }
         }
     }
 
@@ -631,5 +724,24 @@ class RtspService : LifecycleService() {
         } catch (_: Exception) {
             null
         }
+    }
+}
+
+@RequiresApi(Build.VERSION_CODES.Q)
+private class ThermalMonitor(
+    private val powerManager: PowerManager,
+    onStatusChanged: (Int) -> Unit
+) {
+    private val listener = PowerManager.OnThermalStatusChangedListener { status ->
+        onStatusChanged(status)
+    }
+
+    init {
+        onStatusChanged(powerManager.currentThermalStatus)
+        powerManager.addThermalStatusListener(listener)
+    }
+
+    fun close() {
+        runCatching { powerManager.removeThermalStatusListener(listener) }
     }
 }
