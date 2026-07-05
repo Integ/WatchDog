@@ -1,0 +1,260 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 46;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1A0000011A00000000000001 /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000111A00000000000001 /* main.m */; };
+		1A0000021A00000000000001 /* WDAppDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000131A00000000000001 /* WDAppDelegate.m */; };
+		1A0000031A00000000000001 /* WDViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000151A00000000000001 /* WDViewController.m */; };
+		1A0000041A00000000000001 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1A0000211A00000000000001 /* UIKit.framework */; };
+		1A0000051A00000000000001 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1A0000221A00000000000001 /* Foundation.framework */; };
+		1A0000061A00000000000001 /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1A0000231A00000000000001 /* CoreGraphics.framework */; };
+		1A0000071A00000000000001 /* MediaPlayer.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1A0000241A00000000000001 /* MediaPlayer.framework */; };
+		1A0000081A00000000000001 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1A0000251A00000000000001 /* QuartzCore.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		1A0000101A00000000000001 /* WatchDogViewer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WatchDogViewer.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		1A0000111A00000000000001 /* main.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>"; };
+		1A0000121A00000000000001 /* WDAppDelegate.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = WDAppDelegate.h; sourceTree = "<group>"; };
+		1A0000131A00000000000001 /* WDAppDelegate.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WDAppDelegate.m; sourceTree = "<group>"; };
+		1A0000141A00000000000001 /* WDViewController.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = WDViewController.h; sourceTree = "<group>"; };
+		1A0000151A00000000000001 /* WDViewController.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WDViewController.m; sourceTree = "<group>"; };
+		1A0000161A00000000000001 /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		1A0000211A00000000000001 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
+		1A0000221A00000000000001 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
+		1A0000231A00000000000001 /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
+		1A0000241A00000000000001 /* MediaPlayer.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MediaPlayer.framework; path = System/Library/Frameworks/MediaPlayer.framework; sourceTree = SDKROOT; };
+		1A0000251A00000000000001 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		1A0000301A00000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1A0000081A00000000000001 /* QuartzCore.framework in Frameworks */,
+				1A0000071A00000000000001 /* MediaPlayer.framework in Frameworks */,
+				1A0000061A00000000000001 /* CoreGraphics.framework in Frameworks */,
+				1A0000051A00000000000001 /* Foundation.framework in Frameworks */,
+				1A0000041A00000000000001 /* UIKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		1A0000401A00000000000001 = {
+			isa = PBXGroup;
+			children = (
+				1A0000411A00000000000001 /* WatchDogViewer */,
+				1A0000421A00000000000001 /* Frameworks */,
+				1A0000431A00000000000001 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		1A0000411A00000000000001 /* WatchDogViewer */ = {
+			isa = PBXGroup;
+			children = (
+				1A0000161A00000000000001 /* Info.plist */,
+				1A0000111A00000000000001 /* main.m */,
+				1A0000121A00000000000001 /* WDAppDelegate.h */,
+				1A0000131A00000000000001 /* WDAppDelegate.m */,
+				1A0000141A00000000000001 /* WDViewController.h */,
+				1A0000151A00000000000001 /* WDViewController.m */,
+			);
+			path = WatchDogViewer;
+			sourceTree = "<group>";
+		};
+		1A0000421A00000000000001 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				1A0000241A00000000000001 /* MediaPlayer.framework */,
+				1A0000251A00000000000001 /* QuartzCore.framework */,
+				1A0000231A00000000000001 /* CoreGraphics.framework */,
+				1A0000221A00000000000001 /* Foundation.framework */,
+				1A0000211A00000000000001 /* UIKit.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		1A0000431A00000000000001 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				1A0000101A00000000000001 /* WatchDogViewer.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		1A0000501A00000000000001 /* WatchDogViewer */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1A0000901A00000000000001 /* Build configuration list for PBXNativeTarget "WatchDogViewer" */;
+			buildPhases = (
+				1A0000601A00000000000001 /* Sources */,
+				1A0000301A00000000000001 /* Frameworks */,
+				1A0000701A00000000000001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = WatchDogViewer;
+			productName = WatchDogViewer;
+			productReference = 1A0000101A00000000000001 /* WatchDogViewer.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		1A0000801A00000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastUpgradeCheck = 0500;
+				ORGANIZATIONNAME = WatchDog;
+			};
+			buildConfigurationList = 1A0000811A00000000000001 /* Build configuration list for PBXProject "WatchDogViewer" */;
+			compatibilityVersion = "Xcode 3.2";
+			developmentRegion = English;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+			);
+			mainGroup = 1A0000401A00000000000001;
+			productRefGroup = 1A0000431A00000000000001 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				1A0000501A00000000000001 /* WatchDogViewer */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		1A0000701A00000000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		1A0000601A00000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1A0000011A00000000000001 /* main.m in Sources */,
+				1A0000021A00000000000001 /* WDAppDelegate.m in Sources */,
+				1A0000031A00000000000001 /* WDViewController.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		1A0000821A00000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = armv7;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++0x";
+				CLANG_CXX_LIBRARY = "libstdc++";
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu99;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_SYMBOLS_PRIVATE_EXTERN = NO;
+				GCC_VERSION = com.apple.compilers.llvm.clang.1_0;
+				IPHONEOS_DEPLOYMENT_TARGET = 6.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+			};
+			name = Debug;
+		};
+		1A0000831A00000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = armv7;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++0x";
+				CLANG_CXX_LIBRARY = "libstdc++";
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu99;
+				GCC_VERSION = com.apple.compilers.llvm.clang.1_0;
+				IPHONEOS_DEPLOYMENT_TARGET = 6.0;
+				SDKROOT = iphoneos;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		1A0000911A00000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_FILE = WatchDogViewer/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 6.0;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				TARGETED_DEVICE_FAMILY = 1;
+				WRAPPER_EXTENSION = app;
+			};
+			name = Debug;
+		};
+		1A0000921A00000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_FILE = WatchDogViewer/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 6.0;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				TARGETED_DEVICE_FAMILY = 1;
+				WRAPPER_EXTENSION = app;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		1A0000811A00000000000001 /* Build configuration list for PBXProject "WatchDogViewer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1A0000821A00000000000001 /* Debug */,
+				1A0000831A00000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1A0000901A00000000000001 /* Build configuration list for PBXNativeTarget "WatchDogViewer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1A0000911A00000000000001 /* Debug */,
+				1A0000921A00000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 1A0000801A00000000000001 /* Project object */;
+}

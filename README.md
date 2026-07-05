@@ -48,3 +48,18 @@ directly and avoid requesting an output frame rate higher than 15fps.
 4. Add the displayed RTSP URL to Homebridge, VLC, or ffmpeg.
 
 Both the Android device and the RTSP client must be on the same local network.
+
+## iOS Viewer
+
+An iPod touch 4th generation compatible Objective-C viewer app is available at:
+
+```text
+ios/WatchDogViewer/WatchDogViewer.xcodeproj
+```
+
+It is a landscape iOS 6 app that opens the WatchDog RTSP URL and plays it with
+the legacy system media player. See `ios/WatchDogViewer/README.md` and
+`docs/IOS_VIEWER.md` for compatibility notes. GitHub Actions validation is
+configured in `.github/workflows/ios-viewer.yml`; see
+`docs/GITHUB_ACTIONS_IOS.md` for why real iOS 6 builds require a legacy
+self-hosted environment.
