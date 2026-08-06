@@ -3,6 +3,7 @@ package com.watchdog.app
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.os.Bundle
 import android.util.Log
 
 /**
@@ -31,8 +32,10 @@ class H264Encoder(
     }
 
     var onNalUnit: ((data: ByteArray, presentationTimeUs: Long, isConfig: Boolean) -> Unit)? = null
+    var onEncodedFrame: ((data: ByteArray, presentationTimeUs: Long, flags: Int) -> Unit)? = null
     var onSpsPpsReady: ((sps: ByteArray, pps: ByteArray) -> Unit)? = null
     var onVideoFormatChanged: ((width: Int, height: Int, frameRate: Int) -> Unit)? = null
+    var onOutputFormatChanged: ((format: MediaFormat) -> Unit)? = null
 
     val inputMode: InputMode
         get() = selectedInputMode
@@ -121,6 +124,21 @@ class H264Encoder(
         }
     }
 
+    fun requestKeyFrame(): Boolean = synchronized(inputLock) {
+        val mc = codec ?: return false
+        if (!running) return false
+
+        return try {
+            mc.setParameters(Bundle().apply {
+                putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+            })
+            true
+        } catch (exc: Exception) {
+            Log.w(TAG, "Unable to request an immediate key frame", exc)
+            false
+        }
+    }
+
     fun stop() {
         val mc = synchronized(inputLock) {
             running = false
@@ -130,7 +148,9 @@ class H264Encoder(
         outputThread?.join(2000)
         outputThread = null
         onNalUnit = null
+        onEncodedFrame = null
         onSpsPpsReady = null
+        onOutputFormatChanged = null
         sps = null
         pps = null
 
@@ -180,6 +200,7 @@ class H264Encoder(
                             (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
 
                         onNalUnit?.invoke(data, info.presentationTimeUs, isConfig)
+                        onEncodedFrame?.invoke(data, info.presentationTimeUs, info.flags)
                     }
                     mc.releaseOutputBuffer(index, false)
                 } else if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
@@ -195,14 +216,14 @@ class H264Encoder(
                     onVideoFormatChanged?.invoke(actualWidth, actualHeight, actualFrameRate)
                     var spsBytes: ByteArray? = null
                     var ppsBytes: ByteArray? = null
-                    newFormat.getByteBuffer("csd-0")?.let { csd0 ->
+                    newFormat.getByteBuffer("csd-0")?.duplicate()?.let { csd0 ->
                         val bytes = ByteArray(csd0.remaining())
                         csd0.get(bytes)
                         sps = bytes
                         spsBytes = bytes
                         Log.i(TAG, "SPS cached from csd-0 (${bytes.size} bytes)")
                     }
-                    newFormat.getByteBuffer("csd-1")?.let { csd1 ->
+                    newFormat.getByteBuffer("csd-1")?.duplicate()?.let { csd1 ->
                         val bytes = ByteArray(csd1.remaining())
                         csd1.get(bytes)
                         pps = bytes
@@ -214,6 +235,7 @@ class H264Encoder(
                     if (readySps != null && readyPps != null) {
                         onSpsPpsReady?.invoke(readySps, readyPps)
                     }
+                    onOutputFormatChanged?.invoke(newFormat)
                 }
             }
         } catch (_: InterruptedException) {

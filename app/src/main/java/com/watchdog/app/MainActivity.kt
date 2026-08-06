@@ -61,6 +61,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val recordingStateListener = object : RtspService.RecordingStateListener {
+        override fun onRecordingStateChanged(state: RecordingState) {
+            renderRecordingState(state)
+        }
+    }
+
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             val binder = service as? RtspService.LocalBinder ?: return
@@ -68,19 +74,23 @@ class MainActivity : AppCompatActivity() {
             isBound = true
             rtspService?.setCameraStateListener(cameraStateListener)
             rtspService?.setVideoInfoListener(videoInfoListener)
+            rtspService?.setRecordingStateListener(recordingStateListener)
             renderCameraOptions(
                 rtspService?.getAvailableCameras().orEmpty(),
                 rtspService?.getSelectedCameraId()
             )
             updateServerUi()
+            renderRecordingState(rtspService?.getRecordingState() ?: RecordingState(RecordingPhase.IDLE))
             rtspService?.attachPreview(binding.previewView.surfaceProvider)
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
             rtspService?.setCameraStateListener(null)
             rtspService?.setVideoInfoListener(null)
+            rtspService?.setRecordingStateListener(null)
             rtspService = null
             isBound = false
+            binding.btnRecord.isEnabled = false
         }
     }
 
@@ -102,6 +112,7 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         setupCameraSelector()
+        setupRecordingControls()
 
         if (allPermissionsGranted()) {
             shouldStartService = true
@@ -121,6 +132,7 @@ class MainActivity : AppCompatActivity() {
     override fun onStop() {
         rtspService?.setCameraStateListener(null)
         rtspService?.setVideoInfoListener(null)
+        rtspService?.setRecordingStateListener(null)
         rtspService?.detachPreview()
         if (isBound) {
             unbindService(serviceConnection)
@@ -177,6 +189,67 @@ class MainActivity : AppCompatActivity() {
         renderCameraOptions(emptyList(), null)
     }
 
+    private fun setupRecordingControls() {
+        binding.btnRecord.isEnabled = false
+        binding.btnRecord.setOnClickListener {
+            val service = rtspService
+            if (service == null) {
+                renderRecordingState(
+                    RecordingState(RecordingPhase.IDLE, getString(R.string.recording_service_waiting))
+                )
+                return@setOnClickListener
+            }
+
+            if (service.getRecordingState().phase != RecordingPhase.IDLE) {
+                service.stopRecording()
+                return@setOnClickListener
+            }
+
+            startRecordingNow()
+        }
+        renderRecordingState(RecordingState(RecordingPhase.IDLE))
+    }
+
+    private fun startRecordingNow() {
+        val service = rtspService
+        if (service == null || !service.startRecording()) {
+            if (service == null) {
+                renderRecordingState(
+                    RecordingState(RecordingPhase.IDLE, getString(R.string.recording_service_waiting))
+                )
+            }
+        }
+    }
+
+    private fun renderRecordingState(state: RecordingState) {
+        val isActive = state.phase != RecordingPhase.IDLE
+        binding.btnRecord.isEnabled = isBound
+        binding.btnRecord.text = getString(
+            if (isActive) R.string.stop_recording else R.string.start_recording
+        )
+        binding.txtRecordingStatus.text = state.message ?: getString(
+            if (isActive) R.string.recording_preparing else R.string.recording_ready
+        )
+        binding.txtRecordingStatus.setTextColor(
+            ContextCompat.getColor(
+                this,
+                if (isActive) R.color.danger else R.color.white
+            )
+        )
+        updateCameraSelectorEnabled()
+    }
+
+    private fun updateCameraSelectorEnabled() {
+        val hasMultipleCameras = cameraOptions.size > 1
+        val isRecording = rtspService
+            ?.getRecordingState()
+            ?.phase
+            ?.let { it != RecordingPhase.IDLE }
+            ?: false
+        binding.spinnerCamera.isEnabled = hasMultipleCameras && !isRecording
+        binding.spinnerCamera.alpha = if (binding.spinnerCamera.isEnabled) 1f else 0.65f
+    }
+
     private fun renderCameraOptions(
         options: List<CameraOption>,
         selectedCameraId: String?
@@ -188,14 +261,10 @@ class MainActivity : AppCompatActivity() {
         when {
             options.isEmpty() -> {
                 cameraAdapter.add(getString(R.string.camera_loading))
-                binding.spinnerCamera.isEnabled = false
-                binding.spinnerCamera.alpha = 0.65f
             }
 
             else -> {
                 cameraAdapter.addAll(options.map(CameraOption::label))
-                binding.spinnerCamera.isEnabled = options.size > 1
-                binding.spinnerCamera.alpha = 1f
 
                 val selectedIndex = options.indexOfFirst { it.id == selectedCameraId }
                     .takeIf { it >= 0 }
@@ -206,6 +275,7 @@ class MainActivity : AppCompatActivity() {
 
         cameraAdapter.notifyDataSetChanged()
         isUpdatingCameraSelection = false
+        updateCameraSelectorEnabled()
         updateServerUi()
     }
 
@@ -237,4 +307,5 @@ class MainActivity : AppCompatActivity() {
         return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
     }
+
 }

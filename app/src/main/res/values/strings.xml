@@ -6,4 +6,9 @@
     <string name="camera_preview">Camera preview</string>
     <string name="stream_info_format">%1$dx%2$d @ %3$dfps</string>
     <string name="server_status_format">RTSP Server URL:\n%1$s\nCamera: %2$s\nRuns in background when the screen is off</string>
+    <string name="start_recording">Start circular recording</string>
+    <string name="stop_recording">Stop recording</string>
+    <string name="recording_ready">15-minute or 256 MiB segments; automatically keeps the newest 8 GB</string>
+    <string name="recording_preparing">Preparing circular recording…</string>
+    <string name="recording_service_waiting">Camera service is not ready yet</string>
 </resources>

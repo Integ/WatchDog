@@ -51,6 +51,31 @@
             android:paddingVertical="8dp"
             android:spinnerMode="dropdown" />
 
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnRecord"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minHeight="48dp"
+                android:text="@string/start_recording" />
+
+            <TextView
+                android:id="@+id/txtRecordingStatus"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="16dp"
+                android:layout_weight="1"
+                android:text="@string/recording_ready"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+        </LinearLayout>
+
         <TextView
             android:id="@+id/txtStreamInfo"
             android:layout_width="match_parent"

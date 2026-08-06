@@ -1,5 +1,6 @@
 package com.watchdog.app
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.graphics.ImageFormat
+import android.media.MediaCodec
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
@@ -42,6 +44,7 @@ data class VideoStreamInfo(
     val frameRate: Int
 )
 
+@SuppressLint("UnsafeOptInUsageError")
 class RtspService : LifecycleService() {
 
     companion object {
@@ -76,6 +79,7 @@ class RtspService : LifecycleService() {
 
     private var rtspServer: RtspServer? = null
     private var h264Encoder: H264Encoder? = null
+    private lateinit var galleryVideoRecorder: GalleryVideoRecorder
     private var encoderInputBuffer: ByteArray? = null
     private var encoderInputMode: H264Encoder.InputMode? = null
     private var encoderWidth = 0
@@ -100,8 +104,18 @@ class RtspService : LifecycleService() {
         fun onVideoInfoChanged(info: VideoStreamInfo)
     }
 
+    interface RecordingStateListener {
+        fun onRecordingStateChanged(state: RecordingState)
+    }
+
     @Volatile
     private var videoInfoListener: VideoInfoListener? = null
+
+    @Volatile
+    private var recordingStateListener: RecordingStateListener? = null
+
+    @Volatile
+    private var currentRecordingState = RecordingState(RecordingPhase.IDLE)
 
     inner class LocalBinder : Binder() {
         fun getService(): RtspService = this@RtspService
@@ -111,6 +125,7 @@ class RtspService : LifecycleService() {
         super.onCreate()
         Log.i(TAG, "onCreate")
         analysisExecutor = Executors.newSingleThreadExecutor()
+        galleryVideoRecorder = GalleryVideoRecorder(this, ::handleRecordingStateChanged)
         selectedCameraId = loadSelectedCameraId()
         acquireWakeLock()
         registerThermalStatusListener()
@@ -135,6 +150,7 @@ class RtspService : LifecycleService() {
         isDestroyed = true
         Log.i(TAG, "onDestroy")
         stopCamera()
+        galleryVideoRecorder.stop()
         stopStreamingPipeline()
         unregisterThermalStatusListener()
         releaseWakeLock()
@@ -196,6 +212,45 @@ class RtspService : LifecycleService() {
         }
     }
 
+    fun setRecordingStateListener(listener: RecordingStateListener?) {
+        recordingStateListener = listener
+        if (listener != null) {
+            val state = currentRecordingState
+            ContextCompat.getMainExecutor(this).execute {
+                if (recordingStateListener === listener) {
+                    listener.onRecordingStateChanged(state)
+                }
+            }
+        }
+    }
+
+    fun getRecordingState(): RecordingState = currentRecordingState
+
+    fun startRecording(): Boolean {
+        val started = galleryVideoRecorder.start()
+        if (started) {
+            h264Encoder?.requestKeyFrame()
+        }
+        return started
+    }
+
+    fun stopRecording() {
+        galleryVideoRecorder.stop()
+    }
+
+    private fun handleRecordingStateChanged(state: RecordingState) {
+        currentRecordingState = state
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(NOTIFICATION_ID, createNotification())
+
+        val listener = recordingStateListener ?: return
+        ContextCompat.getMainExecutor(this).execute {
+            if (recordingStateListener === listener) {
+                listener.onRecordingStateChanged(state)
+            }
+        }
+    }
+
     @Volatile
     private var currentVideoInfo: VideoStreamInfo? = null
 
@@ -213,6 +268,9 @@ class RtspService : LifecycleService() {
     }
 
     fun setSelectedCamera(cameraId: String): Boolean {
+        if (galleryVideoRecorder.isActive) {
+            return false
+        }
         if (cameraId == selectedCameraId) {
             return true
         }
@@ -328,7 +386,7 @@ class RtspService : LifecycleService() {
             Log.i(TAG, "Starting encoder for camera frame size ${width}x${height}")
         }
 
-        stopEncoderLocked()
+        stopEncoderLocked(stopRecording = existing != null)
 
         return H264Encoder(
             width = width,
@@ -339,6 +397,11 @@ class RtspService : LifecycleService() {
             onNalUnit = { data, pts, isConfig ->
                 rtspServer?.feedNalUnit(data, pts, isConfig)
             }
+            onEncodedFrame = { data, pts, flags ->
+                if ((flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+                    galleryVideoRecorder.writeSample(data, pts, flags)
+                }
+            }
             onSpsPpsReady = { sps, pps ->
                 rtspServer?.sps = sps
                 rtspServer?.pps = pps
@@ -346,6 +409,7 @@ class RtspService : LifecycleService() {
             onVideoFormatChanged = { w, h, fps ->
                 notifyVideoInfo(VideoStreamInfo(w, h, minOf(fps, targetFrameRate)))
             }
+            onOutputFormatChanged = galleryVideoRecorder::setVideoFormat
             start()
             h264Encoder = this
             encoderWidth = width
@@ -357,21 +421,28 @@ class RtspService : LifecycleService() {
     }
 
     private fun stopStreamingPipeline() = synchronized(streamingLock) {
-        stopEncoderLocked()
+        galleryVideoRecorder.stop()
+        stopEncoderLocked(stopRecording = false)
         rtspServer?.stop()
         rtspServer = null
     }
 
-    private fun stopEncoderLocked() {
+    private fun stopEncoderLocked(stopRecording: Boolean = true) {
+        if (stopRecording) {
+            galleryVideoRecorder.stop()
+        }
         h264Encoder?.onNalUnit = null
+        h264Encoder?.onEncodedFrame = null
         h264Encoder?.onSpsPpsReady = null
         h264Encoder?.onVideoFormatChanged = null
+        h264Encoder?.onOutputFormatChanged = null
         h264Encoder?.stop()
         h264Encoder = null
         encoderWidth = 0
         encoderHeight = 0
         encoderInputMode = null
         encoderInputBuffer = null
+        galleryVideoRecorder.clearVideoFormat()
         currentVideoInfo = null
         lastAcceptedFrameTimestampNs = 0L
         encoderRetryAfterTimestampNs = 0L
@@ -609,9 +680,18 @@ class RtspService : LifecycleService() {
             PendingIntent.FLAG_IMMUTABLE
         )
 
+        val isRecording = currentRecordingState.phase != RecordingPhase.IDLE
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("WatchDog Streaming")
-            .setContentText("Camera is running in the background")
+            .setContentTitle(
+                if (isRecording) "WatchDog Recording" else "WatchDog Streaming"
+            )
+            .setContentText(
+                if (isRecording) {
+                    "Circular recording active · newest 8 GB retained"
+                } else {
+                    "Camera is running in the background"
+                }
+            )
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setSmallIcon(R.mipmap.wd_launcher)
